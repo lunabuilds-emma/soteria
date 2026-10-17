@@ -444,31 +444,45 @@ function LegalReview({ notify }: { notify: (message: string) => void }) {
 
 type IntakeDocument = { name: string; size: number; text: string; readable: boolean };
 
-function cleanDocumentName(name: string) {
-  return name
-    .replace(/\.[^.]+$/, "")
-    .replace(/(?:^|[_-])(prd|spec|model[_-]?card|dpia|v\d+|\d{4}[-_]\d{2})(?:$|[_-])/gi, " ")
-    .replace(/[_-]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .replace(/\b\w/g, (letter) => letter.toUpperCase());
-}
+type AutofillFact = { field: string; value: string | string[]; confidence: number; needs_review: boolean };
+type AutofillFramework = { name: string; status: "candidate" | "recommended"; rationale: string; validation: string };
+type AutofillBlocker = { id: string; title: string; owner: string; evidence_needed: string };
+type AutofillAssessment = {
+  title: string;
+  autofill_confidence: number;
+  editable_facts: AutofillFact[];
+  candidate_frameworks: AutofillFramework[];
+  risk_signals: string[];
+  blockers: AutofillBlocker[];
+  plan: { decision: string; decision_label: string; evidence_readiness: number; next_steps: string[] };
+  source_summary: { documents_analyzed: number; links_supplied: number; standards_supplied: number; evidence_items_supplied: number };
+  disclaimer: string;
+};
+
+const demoDocuments: IntakeDocument[] = [
+  { name: "Aster-AI-Compliance-Review-Demo-Submission.md", size: 24700, readable: true, text: "Company: Aster Financial\nProduct: Aster Credit Memo Assistant\nOwner: Chief Risk Officer\nStage: Pilot\nUsers: Credit analysts and credit officers\nIntended purpose: Draft factual consumer credit memos from authorized repayment history for officer review; it cannot approve credit or send external notices.\nDeployment: European Union, Ireland, United States, New York.\nTarget pilot date: 15 January 2027.\nThe pilot is submitted for review and is not approved. It uses a vendor-hosted LLM and customer credit information. A credit committee retains the lending decision." },
+  { name: "VENDOR-CONFIG-v7.txt", size: 4200, readable: true, text: "Fictional enterprise LLM endpoint. Raw prompt payload retention is configured for 365 days, contrary to transient-processing policy RET-POL-v2. Processing regions, subprocessors, support access, transfer safeguards, and signed terms are unconfirmed." },
+  { name: "CREDIT-TRACE-R.json", size: 6800, readable: true, text: "Synthetic staging trace: retrieval returned superseded record v3 while v4 existed; the current dispute was omitted; full report fields reached an unapproved endpoint. This is failing staging evidence, not a production breach." },
+  { name: "VALIDATION-v4.pdf", size: 31800, readable: false, text: "" },
+];
+
+const demoIntake = {
+  links: "https://risk.aster.example/credit-memo-assistant\nhttps://policies.aster.example/credit-data",
+  standards: "RET-POL-v2 · Transient raw-prompt policy\nCREDIT-POL-v2 · Assigned-case access and allowed fields\nMR-POL-v3 · Validation and independent review\nREPORT-POL-v2 · Evidence and submission status",
+  context: "Assess pilot readiness separately for Aster EU and Aster US Lending. Treat proposed controls as untested until evidence is supplied.",
+};
 
 function Assessment({ notify }: { notify: (message: string) => void }) {
   const [generated, setGenerated] = useState(false);
   const [autofillRan, setAutofillRan] = useState(false);
   const [autofillStatus, setAutofillStatus] = useState<"idle" | "analyzing" | "complete">("idle");
-  const [documents, setDocuments] = useState<IntakeDocument[]>([
-    { name: "Aster-AI-Compliance-Review-Demo-Submission.md", size: 24700, readable: true, text: "Company: Aster Financial\nProduct: Aster Credit Memo Assistant\nOwner: Chief Risk Officer\nStage: Pilot\nUsers: Credit analysts\nIntended purpose: Draft factual consumer credit memos from authorized repayment history for officer review; it cannot approve credit or send external notices.\nDeployment: European Union, Ireland, United States, New York.\nTarget pilot date: 15 January 2027.\nThe pilot is submitted for review and is not approved. It uses a vendor-hosted LLM and customer credit information. A credit committee retains the lending decision." },
-    { name: "VENDOR-CONFIG-v7.txt", size: 4200, readable: true, text: "Fictional enterprise LLM endpoint. Raw prompt payload retention is configured for 365 days, contrary to transient-processing policy RET-POL-v2. Processing regions, subprocessors, support access, transfer safeguards, and signed terms are unconfirmed." },
-    { name: "CREDIT-TRACE-R.json", size: 6800, readable: true, text: "Synthetic staging trace: retrieval returned superseded record v3 while v4 existed; the current dispute was omitted; full report fields reached an unapproved endpoint. This is failing staging evidence, not a production breach." },
-    { name: "VALIDATION-v4.pdf", size: 31800, readable: false, text: "" },
-  ]);
-  const [intake, setIntake] = useState({
-    links: "https://risk.aster.example/credit-memo-assistant\nhttps://policies.aster.example/credit-data",
-    standards: "RET-POL-v2 · Transient raw-prompt policy\nCREDIT-POL-v2 · Assigned-case access and allowed fields\nMR-POL-v3 · Validation and independent review\nREPORT-POL-v2 · Evidence and submission status",
-    context: "Assess pilot readiness separately for Aster EU and Aster US Lending. Treat proposed controls as untested until evidence is supplied.",
-  });
+  const [analysisStep, setAnalysisStep] = useState(0);
+  const [autofillError, setAutofillError] = useState("");
+  const [autofillScore, setAutofillScore] = useState(0);
+  const [assessment, setAssessment] = useState<AutofillAssessment | null>(null);
+  const [editedFields, setEditedFields] = useState<string[]>([]);
+  const [documents, setDocuments] = useState<IntakeDocument[]>(demoDocuments);
+  const [intake, setIntake] = useState(demoIntake);
   const [profile, setProfile] = useState({
     name: "",
     owner: "",
@@ -487,8 +501,40 @@ function Assessment({ notify }: { notify: (message: string) => void }) {
   const toggleReportSection = (key: keyof typeof reportSections) => setReportSections((current) => ({ ...current, [key]: !current[key] }));
   const readableDocuments = documents.filter((document) => document.readable).length;
   const linkCount = intake.links.split("\n").filter((link) => link.trim()).length;
-  const structuredSourceBonus = documents.some((document) => /submission|proposal|spec/i.test(document.name) && document.text.length > 300) ? 8 : 0;
-  const autofillConfidence = Math.min(97, 54 + readableDocuments * 7 + Math.min(linkCount, 3) * 3 + (intake.standards.trim() ? 6 : 0) + (intake.context.trim() ? 3 : 0) + structuredSourceBonus);
+  const autofillConfidence = autofillScore;
+  const markEdited = (field: string) => setEditedFields((current) => current.includes(field) ? current : [...current, field]);
+  const loadDemo = () => {
+    setDocuments(demoDocuments);
+    setIntake(demoIntake);
+    setProfile({ name: "", owner: "", purpose: "", stage: "Design", users: "Employees" });
+    setFeatures({ decisions: false, employees: false, generation: false, biometrics: false, minors: false });
+    setRegions([]);
+    setAssessment(null);
+    setAutofillScore(0);
+    setAutofillRan(false);
+    setAutofillStatus("idle");
+    setEditedFields([]);
+    setCompleted([]);
+    setGenerated(false);
+    setAutofillError("");
+    notify("Fictional Aster customer demo loaded");
+  };
+  const startBlank = () => {
+    setDocuments([]);
+    setIntake({ links: "", standards: "", context: "" });
+    setProfile({ name: "", owner: "", purpose: "", stage: "Design", users: "Employees" });
+    setFeatures({ decisions: false, employees: false, generation: false, biometrics: false, minors: false });
+    setRegions([]);
+    setAssessment(null);
+    setAutofillScore(0);
+    setAutofillRan(false);
+    setAutofillStatus("idle");
+    setEditedFields([]);
+    setCompleted([]);
+    setGenerated(false);
+    setAutofillError("");
+    notify("Blank product intake ready");
+  };
   const handleDocuments = async (files: FileList | null) => {
     const selected = Array.from(files ?? []);
     if (!selected.length) return;
@@ -500,7 +546,7 @@ function Assessment({ notify }: { notify: (message: string) => void }) {
       }
       return { name: file.name, size: file.size, text, readable: readable && Boolean(text) };
     }));
-    setDocuments(parsed);
+    setDocuments((current) => [...current.filter((item) => !parsed.some((next) => next.name === item.name)), ...parsed]);
     setAutofillRan(false);
     setAutofillStatus("idle");
   };
@@ -512,44 +558,64 @@ function Assessment({ notify }: { notify: (message: string) => void }) {
     }
     setAutofillStatus("analyzing");
     setAutofillRan(false);
-    await new Promise((resolve) => window.setTimeout(resolve, 900));
-    const rawSource = [documents.map((document) => `${document.name}\n${document.text}`).join("\n"), intake.links, intake.standards, intake.context].join("\n");
-    const source = rawSource.toLowerCase();
-    const findLine = (label: string) => rawSource.match(new RegExp(`(?:^|\\n)${label}\\s*[:\\-]\\s*([^\\n]{2,240})`, "i"))?.[1]?.trim();
-    const urlName = intake.links.match(/https?:\/\/[^\s]+\/([^\s/?#]+)/i)?.[1]?.replace(/[-_]+/g, " ");
-    const inferredName = findLine("(?:product|system)(?: name)?") || (source.includes("aster financial") ? "Aster Credit Memo Assistant" : source.includes("atlas assist") ? "Atlas Assist" : urlName ? urlName.replace(/\b\w/g, (letter) => letter.toUpperCase()) : cleanDocumentName(documents[0]?.name ?? "AI Product"));
-    const inferredOwner = findLine("(?:primary )?owner") || findLine("accountable[_ ]owner") || (source.includes("credit memo") ? "Chief Risk Officer" : source.includes("customer") || source.includes("support") ? "Customer Experience AI" : source.includes("recruit") || source.includes("employment") ? "People AI" : source.includes("fraud") ? "Financial Crime Analytics" : "AI Product Team");
-    const inferredPurpose = findLine("(?:intended )?purpose") || (source.includes("credit memo") ? "Draft factual consumer credit memos from authorized repayment history for officer review; lending decisions remain with the credit committee." : source.includes("support") || source.includes("customer") ? "Generative assistant that summarizes customer records and drafts support responses for human approval." : source.includes("recruit") || source.includes("candidate") ? "AI system that supports candidate screening and ranking for human recruiters." : source.includes("fraud") ? "AI system that identifies potentially fraudulent transactions for analyst review." : "AI-enabled product inferred from the supplied specifications and governance materials.");
-    const statedStage = findLine("(?:lifecycle )?stage")?.toLowerCase();
-    const statedUsers = findLine("(?:primary )?users?")?.toLowerCase();
-    const inferredStage = statedStage?.includes("pilot") ? "Pilot" : statedStage?.includes("production") ? "Production" : /\bpilot\b|beta|proof of concept|\bpoc\b/.test(source) ? "Pilot" : /\bproduction\b|\blive\b|deployed/.test(source) ? "Production" : "Design";
-    const inferredUsers = statedUsers ? (/analyst|employee|officer|internal/.test(statedUsers) ? "Employees" : /both/.test(statedUsers) ? "Both" : "Consumers") : /employees?|internal users?|support agents?|recruiters?|credit analysts?/.test(source) ? "Employees" : "Consumers";
-    const inferredRegions = [
-      [/european union|\beu\b|europe/, "European Union"],
-      [/united states|\busa?\b|california|colorado|new york/, "United States"],
-      [/south korea|korean?/, "South Korea"],
-      [/china|chinese|\bcac\b/, "China"],
-      [/united kingdom|\buk\b|britain/, "United Kingdom"],
-    ].filter(([pattern]) => (pattern as RegExp).test(source)).map(([, region]) => region as string);
-    setProfile({ name: inferredName, owner: inferredOwner, purpose: inferredPurpose, stage: inferredStage, users: inferredUsers });
-    setFeatures({
-      decisions: /decision|rank|eligib|credit|fraud|recommend/.test(source),
-      employees: /employment|recruit|candidate|promotion|termination/.test(source),
-      generation: /generative|generate|draft|synthetic|large language|\bllm\b/.test(source),
-      biometrics: /biometric|facial|voiceprint|fingerprint/.test(source) && !/no biometric/.test(source),
-      minors: /minor|child|children|under 18/.test(source) && !/no use by minors|not.*minor/.test(source),
-    });
-    setRegions(inferredRegions.length ? inferredRegions : ["United States"]);
-    setFieldConfidence({
-      name: findLine("(?:product|system)(?: name)?") ? 99 : 86,
-      owner: findLine("(?:primary )?owner") || findLine("accountable[_ ]owner") ? 96 : 78,
-      purpose: findLine("(?:intended )?purpose") ? 94 : 74,
-      stage: statedStage ? 98 : /\bproduction\b|\blive\b|deployed|\bpilot\b|beta|proof of concept|\bpoc\b/.test(source) ? 90 : 67,
-      users: statedUsers ? 97 : /employees?|internal users?|support agents?|credit analysts?|customers?|consumers?/.test(source) ? 90 : 65,
-    });
-    setAutofillRan(true);
-    setAutofillStatus("complete");
-    notify(`Autofilled ${inferredName} from ${sourceCount} sources`);
+    setAutofillError("");
+    setEditedFields([]);
+    setAnalysisStep(0);
+    const steps = [250, 560, 860].map((delay, index) => window.setTimeout(() => setAnalysisStep(index + 1), delay));
+    try {
+      const rawSource = documents.map((document) => `Document: ${document.name}\n${document.readable ? document.text : "[File name captured; full text was not available in this browser demo.]"}`).join("\n\n");
+      const response = await fetch("/api/autofill", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          source_text: rawSource,
+          spec_links: intake.links.split("\n").map((item) => item.trim()).filter(Boolean),
+          responsible_ai_standards: intake.standards.split("\n").map((item) => item.trim()).filter(Boolean),
+          review_focus: intake.context,
+        }),
+      });
+      if (!response.ok) throw new Error("Assessment request failed");
+      const result = await response.json() as AutofillAssessment;
+      await new Promise((resolve) => window.setTimeout(resolve, 1050));
+      const fact = (field: string) => result.editable_facts.find((item) => item.field === field);
+      const capabilities = (fact("capabilities")?.value as string[] | undefined) ?? [];
+      const inferredRegions = (fact("regions")?.value as string[] | undefined) ?? [];
+      const inferredUsers = String(fact("users")?.value ?? "Employees");
+      setProfile({
+        name: String(fact("product_name")?.value ?? ""),
+        owner: String(fact("owner")?.value ?? ""),
+        purpose: String(fact("purpose")?.value ?? ""),
+        stage: String(fact("stage")?.value ?? "Design"),
+        users: /both/i.test(inferredUsers) ? "Both" : /analyst|employee|officer|internal|recruiter/i.test(inferredUsers) ? "Employees" : "Consumers",
+      });
+      setFeatures({
+        decisions: capabilities.includes("consequential_decisions"),
+        employees: capabilities.includes("employment"),
+        generation: capabilities.includes("generative_ai"),
+        biometrics: capabilities.includes("biometrics"),
+        minors: capabilities.includes("children"),
+      });
+      setRegions(inferredRegions.length ? inferredRegions.map((region) => region === "Ireland" ? "European Union" : region === "New York" ? "United States" : region).filter((region, index, all) => all.indexOf(region) === index) : []);
+      setFieldConfidence({
+        name: fact("product_name")?.confidence ?? 0,
+        owner: fact("owner")?.confidence ?? 0,
+        purpose: fact("purpose")?.confidence ?? 0,
+        stage: fact("stage")?.confidence ?? 0,
+        users: fact("users")?.confidence ?? 0,
+      });
+      setAssessment(result);
+      setAutofillScore(result.autofill_confidence);
+      setCompleted([]);
+      setAutofillRan(true);
+      setAutofillStatus("complete");
+      notify(`Autofilled ${String(fact("product_name")?.value ?? "product assessment")} from ${sourceCount} sources`);
+    } catch {
+      setAutofillStatus("idle");
+      setAutofillError("Autofill could not complete. Your intake is still here—try again.");
+      notify("Autofill could not complete");
+    } finally {
+      steps.forEach((timer) => window.clearTimeout(timer));
+    }
   };
   const checklist = [
     ["DATA-01", "Fix current-record retrieval and dispute preservation", "Before pilot", "Version, correction, and revised-memo tests", "EU privacy · US credit"],
@@ -559,22 +625,31 @@ function Assessment({ notify }: { notify: (message: string) => void }) {
     ["LAW-05", "Confirm entity-specific duties and schedules", "Before approval", "Legal mapping and retention schedule", "Ireland · New York"],
     ["INC-06", "Approve incident, reporting, and recovery routes", "Before pilot", "Signed matrix, tabletop, recovery test", "Entity specific"],
   ];
+  const currentBlockers: AutofillBlocker[] = assessment?.blockers ?? checklist.map(([id, title, , evidence, sources]) => ({ id, title, owner: sources, evidence_needed: evidence }));
+  const currentFrameworks = assessment?.candidate_frameworks ?? [];
+  const isAsterDemo = /aster/i.test(profile.name);
+  const reportSummary = isAsterDemo
+    ? `${profile.name} is a draft-only assistant proposed for credit analysts. It uses customer credit history to prepare factual memos, but officers must verify sources and the credit committee retains every lending decision. Aster EU and Aster US Lending require separate approvals.`
+    : `${profile.name || "This product"} is a ${profile.stage.toLowerCase()}-stage AI system for ${profile.users.toLowerCase()}. ${profile.purpose || "Its intended purpose still needs to be confirmed."} This draft separates extracted facts from candidate legal scope and routes every decision to a human owner.`;
+  const reportDecision = assessment?.plan.decision_label ?? "Complete the named evidence and legal review before launch";
+  const roadmapGroups = [currentBlockers.slice(0, 2), currentBlockers.slice(2, 4), currentBlockers.slice(4)];
+  const analysisLabels = ["Reading source material", "Extracting product facts", "Mapping risk signals", "Building the review plan"];
   return (
     <div className="view-stack">
-      <SectionTitle eyebrow="Assess" title="Product assessment" detail="Turn product facts into a compliance plan." action={<Badge tone={generated ? "green" : "blue"}>{generated ? "Report ready" : `Draft · ${profile.name || "New product"}`}</Badge>} />
+      <SectionTitle eyebrow="Assess" title="Product assessment" detail="Show how Soteria turns scattered product evidence into an editable, review-ready decision." action={<Badge tone={generated ? "green" : "purple"}>{generated ? "Report ready" : "Customer demo · Fictional data"}</Badge>} />
       {!generated ? (
         <>
         <section className="ai-intake panel">
           <div className="ai-intake-heading">
-            <div className="ai-intake-title"><span className="ai-spark">✦</span><div><p className="eyebrow">AI autofill</p><h2>Autofill from your documents</h2><p>Add source material. Soteria fills the form; you review every answer.</p></div></div>
-            {autofillRan ? <div className="autofill-score"><div><strong>{autofillConfidence}</strong><span>%</span></div><small>Autofill confidence</small></div> : <Badge tone="purple">Human review required</Badge>}
+            <div className="ai-intake-title"><span className="ai-spark">✦</span><div><p className="eyebrow">AI autofill</p><h2>From source material to review-ready facts</h2><p>Upload specs, add product links and internal standards, then review every extracted answer and its confidence.</p></div></div>
+            <div className="demo-actions"><button className="secondary-button" onClick={loadDemo}>Load Aster demo</button><button className="secondary-button" onClick={startBlank}>Try my product</button>{autofillRan && <div className="autofill-score"><div><strong>{autofillConfidence}</strong><span>%</span></div><small>Extraction confidence</small></div>}</div>
           </div>
           <div className="intake-source-grid">
             <div className="intake-source-card">
               <div className="source-card-head"><span className="source-type-icon">▤</span><div><b>Documents</b><small>Specs, model cards, DPIAs</small></div></div>
               <label className="upload-drop">+ Add files<input type="file" multiple accept=".pdf,.doc,.docx,.txt,.md,.json,.csv" onChange={(event) => { void handleDocuments(event.target.files); event.target.value = ""; }} /></label>
               <div className="document-chips">
-                {documents.length ? documents.map((document) => <span key={document.name}>{document.name}{document.readable && <i>read</i>}<button aria-label={`Remove ${document.name}`} onClick={() => { setDocuments((current) => current.filter((item) => item.name !== document.name)); setAutofillRan(false); setAutofillStatus("idle"); }}>×</button></span>) : <small>No documents selected</small>}
+                {documents.length ? documents.map((document) => <span key={document.name}>{document.name}<i className={document.readable ? "read" : "name-only"}>{document.readable ? "full text" : "name only"}</i><button aria-label={`Remove ${document.name}`} onClick={() => { setDocuments((current) => current.filter((item) => item.name !== document.name)); setAutofillRan(false); setAutofillStatus("idle"); setAssessment(null); }}>×</button></span>) : <small>No documents selected</small>}
               </div>
             </div>
             <label className="intake-source-card source-field" htmlFor="assessment-links" aria-label="Documentation links">
@@ -588,18 +663,21 @@ function Assessment({ notify }: { notify: (message: string) => void }) {
           </div>
           <div className="intake-instructions">
             <label><span>Instructions <em>Optional</em></span><input value={intake.context} onChange={(event) => { setIntake((current) => ({ ...current, context: event.target.value })); setAutofillRan(false); setAutofillStatus("idle"); }} placeholder="What should the AI prioritize?" /></label>
-            <button className={`button button-dark autofill-button ${autofillStatus === "analyzing" ? "loading" : ""}`} disabled={autofillStatus === "analyzing"} onClick={() => { void runAutofill(); }}><span>{autofillStatus === "analyzing" ? "◌" : "✦"}</span>{autofillStatus === "analyzing" ? "Analyzing sources…" : autofillRan ? "Run autofill again" : "Autofill assessment"}</button>
+            <button className={`button button-dark autofill-button ${autofillStatus === "analyzing" ? "loading" : ""}`} disabled={autofillStatus === "analyzing"} onClick={() => { void runAutofill(); }}><span>{autofillStatus === "analyzing" ? "◌" : "✦"}</span>{autofillStatus === "analyzing" ? analysisLabels[analysisStep] : autofillRan ? "Run autofill again" : "Autofill assessment"}</button>
           </div>
+          {autofillStatus === "analyzing" && <div className="analysis-progress" aria-live="polite">{analysisLabels.map((label, index) => <span key={label} className={index < analysisStep ? "done" : index === analysisStep ? "active" : ""}><i>{index < analysisStep ? "✓" : index + 1}</i>{label}</span>)}</div>}
+          {autofillError && <div className="autofill-error" role="alert"><b>Autofill paused</b><span>{autofillError}</span><button onClick={() => { void runAutofill(); }}>Retry</button></div>}
           {autofillRan && <div className="autofill-result">
-            <div className="result-summary"><span className="result-check">✓</span><span><b>18 product facts extracted</b><small>{documents.length + linkCount + (intake.standards.trim() ? 1 : 0)} sources analyzed · {readableDocuments} full-text</small></span></div>
-            <div className="confidence-breakdown"><span><i style={{ width: `${Math.round((fieldConfidence.name + fieldConfidence.owner + fieldConfidence.purpose) / 3)}%` }} /><b>Product profile</b><em>{Math.round((fieldConfidence.name + fieldConfidence.owner + fieldConfidence.purpose) / 3)}%</em></span><span><i style={{ width: "88%" }} /><b>Risk attributes</b><em>88%</em></span><span><i style={{ width: regions.length > 1 ? "91%" : "68%" }} /><b>Deployment scope</b><em>{regions.length > 1 ? "91%" : "68%"}</em></span></div>
-            <p>Everything below is editable and requires your review.</p>
+            <div className="result-summary"><span className="result-check">✓</span><span><b>{assessment?.editable_facts.length ?? 0} core facts extracted</b><small>{documents.length + linkCount + (intake.standards.trim() ? 1 : 0)} sources supplied · {readableDocuments} full-text</small></span></div>
+            <div className="confidence-breakdown"><span><i style={{ width: `${Math.round((fieldConfidence.name + fieldConfidence.owner + fieldConfidence.purpose) / 3)}%` }} /><b>Product profile</b><em>{Math.round((fieldConfidence.name + fieldConfidence.owner + fieldConfidence.purpose) / 3)}%</em></span><span><i style={{ width: `${Math.max(64, autofillConfidence - 7)}%` }} /><b>Risk attributes</b><em>{Math.max(64, autofillConfidence - 7)}%</em></span><span><i style={{ width: `${regions.length > 1 ? 91 : 68}%` }} /><b>Deployment scope</b><em>{regions.length > 1 ? "91%" : "68%"}</em></span></div>
+            <p>Editable draft · {assessment?.blockers.length ?? 0} evidence gaps found · human approval required</p>
           </div>}
         </section>
         <div className="assessment-layout">
           <section className="assessment-form panel">
             <div className="step-label"><span>1</span><div><b>Product profile</b><small>Describe the system and its use</small></div></div>
-            <div className="form-grid"><label><span>Product name {autofillRan && <em className={fieldConfidence.name < 80 ? "ai-field-tag review" : "ai-field-tag"}>AI filled · {fieldConfidence.name}%</em>}</span><input value={profile.name} placeholder="Product name" onChange={(event) => setProfile((current) => ({ ...current, name: event.target.value }))} /></label><label><span>Primary owner {autofillRan && <em className={fieldConfidence.owner < 80 ? "ai-field-tag review" : "ai-field-tag"}>AI filled · {fieldConfidence.owner}%</em>}</span><input value={profile.owner} placeholder="Owning team" onChange={(event) => setProfile((current) => ({ ...current, owner: event.target.value }))} /></label><label className="wide"><span>Intended purpose {autofillRan && <em className={fieldConfidence.purpose < 80 ? "ai-field-tag review" : "ai-field-tag"}>{fieldConfidence.purpose < 80 ? "Confirm" : "AI filled"} · {fieldConfidence.purpose}%</em>}</span><textarea value={profile.purpose} placeholder="What does the system do?" onChange={(event) => setProfile((current) => ({ ...current, purpose: event.target.value }))} /></label><label><span>Lifecycle stage {autofillRan && <em className={fieldConfidence.stage < 80 ? "ai-field-tag review" : "ai-field-tag"}>AI filled · {fieldConfidence.stage}%</em>}</span><select value={profile.stage} onChange={(event) => setProfile((current) => ({ ...current, stage: event.target.value }))}><option>Design</option><option>Pilot</option><option>Production</option></select></label><label><span>Primary users {autofillRan && <em className={fieldConfidence.users < 80 ? "ai-field-tag review" : "ai-field-tag"}>AI filled · {fieldConfidence.users}%</em>}</span><select value={profile.users} onChange={(event) => setProfile((current) => ({ ...current, users: event.target.value }))}><option>Consumers</option><option>Employees</option><option>Both</option></select></label></div>
+            <div className="form-grid"><label><span>Product name {autofillRan && <em className={editedFields.includes("name") ? "ai-field-tag edited" : fieldConfidence.name < 80 ? "ai-field-tag review" : "ai-field-tag"}>{editedFields.includes("name") ? "Edited by you" : `AI filled · ${fieldConfidence.name}%`}</em>}</span><input value={profile.name} placeholder="Product name" onChange={(event) => { markEdited("name"); setProfile((current) => ({ ...current, name: event.target.value })); }} /></label><label><span>Primary owner {autofillRan && <em className={editedFields.includes("owner") ? "ai-field-tag edited" : fieldConfidence.owner < 80 ? "ai-field-tag review" : "ai-field-tag"}>{editedFields.includes("owner") ? "Edited by you" : `AI filled · ${fieldConfidence.owner}%`}</em>}</span><input value={profile.owner} placeholder="Owning team" onChange={(event) => { markEdited("owner"); setProfile((current) => ({ ...current, owner: event.target.value })); }} /></label><label className="wide"><span>Intended purpose {autofillRan && <em className={editedFields.includes("purpose") ? "ai-field-tag edited" : fieldConfidence.purpose < 80 ? "ai-field-tag review" : "ai-field-tag"}>{editedFields.includes("purpose") ? "Edited by you" : `${fieldConfidence.purpose < 80 ? "Confirm" : "AI filled"} · ${fieldConfidence.purpose}%`}</em>}</span><textarea value={profile.purpose} placeholder="What does the system do?" onChange={(event) => { markEdited("purpose"); setProfile((current) => ({ ...current, purpose: event.target.value })); }} /></label><label><span>Lifecycle stage {autofillRan && <em className={editedFields.includes("stage") ? "ai-field-tag edited" : fieldConfidence.stage < 80 ? "ai-field-tag review" : "ai-field-tag"}>{editedFields.includes("stage") ? "Edited by you" : `AI filled · ${fieldConfidence.stage}%`}</em>}</span><select value={profile.stage} onChange={(event) => { markEdited("stage"); setProfile((current) => ({ ...current, stage: event.target.value })); }}><option>Design</option><option>Pilot</option><option>Production</option></select></label><label><span>Primary users {autofillRan && <em className={editedFields.includes("users") ? "ai-field-tag edited" : fieldConfidence.users < 80 ? "ai-field-tag review" : "ai-field-tag"}>{editedFields.includes("users") ? "Edited by you" : `AI filled · ${fieldConfidence.users}%`}</em>}</span><select value={profile.users} onChange={(event) => { markEdited("users"); setProfile((current) => ({ ...current, users: event.target.value })); }}><option>Consumers</option><option>Employees</option><option>Both</option></select></label></div>
+            {autofillRan && <div className="source-trace"><div><span>Source trail</span><b>{documents.filter((document) => document.readable).map((document) => document.name).slice(0, 2).join(" · ") || "Manual intake"}</b></div><div><span>Needs confirmation</span><b>{assessment?.editable_facts.filter((fact) => fact.needs_review).map((fact) => fact.field.replaceAll("_", " ")).join(" · ") || "No low-confidence core facts"}</b></div></div>}
             <div className="step-label"><span>2</span><div><b>Risk-relevant attributes</b><small>Select every behavior that applies</small></div></div>
             <div className="toggle-grid">
               {[
@@ -617,17 +695,17 @@ function Assessment({ notify }: { notify: (message: string) => void }) {
             <button className="button button-dark generate" disabled={!profile.name || !profile.purpose} onClick={() => { setGenerated(true); notify("Tailored compliance plan generated"); }}>Generate tailored plan <span>→</span></button>
           </section>
           <aside className="assessment-insight panel">
-            <p className="eyebrow">Live applicability</p><h2>Likely regulated</h2><p>Based on the current profile, {profile.name} triggers transparency, documentation, risk management, and human oversight duties.</p>
-            <div className="risk-orbit"><div><strong>4</strong><span>frameworks</span></div></div>
-            <div className="trigger-list"><div><span className="change-dot green"/><span><b>EU AI Act</b><small>Credit workflow classification required</small></span></div><div><span className="change-dot blue"/><span><b>EU privacy</b><small>Purpose, minimization, DPIA, vendor terms</small></span></div><div><span className="change-dot purple"/><span><b>US credit laws</b><small>FCRA, ECOA, records, explanations</small></span></div><div><span className="change-dot amber"/><span><b>New York rules</b><small>Licensing, privacy, retention mapping</small></span></div></div>
-            <p className="assessment-caveat">This preview updates as facts change. Final applicability requires legal approval.</p>
+            <p className="eyebrow">Live scope preview</p><h2>{autofillRan ? "Candidate obligations" : "Ready for intake"}</h2><p>{autofillRan ? `Soteria found ${currentFrameworks.length} frameworks to validate and ${currentBlockers.length} evidence gaps to close.` : "Run autofill to separate extracted product facts from candidate regulatory scope."}</p>
+            <div className="risk-orbit"><div><strong>{currentFrameworks.length || "—"}</strong><span>frameworks</span></div></div>
+            <div className="trigger-list">{currentFrameworks.slice(0, 4).map((framework, index) => <div key={framework.name}><span className={`change-dot ${["green", "blue", "purple", "amber"][index]}`}/><span><b>{framework.name}</b><small>{framework.rationale}</small></span></div>)}</div>
+            <p className="assessment-caveat">Candidate scope, not legal advice. Every inferred fact remains editable and final applicability requires qualified review.</p>
           </aside>
         </div>
         </>
       ) : (
         <div className="plan-layout">
-          <section className="plan-summary panel"><div><p className="eyebrow">Customized report</p><h2>{profile.name} pilot review</h2><p>18 product facts · 11 evidence records · Updated 29 Sep 2026</p></div><div className="plan-score"><strong>42</strong><span>/100<br />readiness</span></div><div className="plan-actions"><button className="secondary-button" onClick={() => setGenerated(false)}>Edit facts</button><button className="button button-dark" onClick={() => notify("Customized report prepared for export")}>Export report</button></div></section>
-          <section className="plan-banner"><div><b>31</b><span>applicable obligations</span></div><div><b>10</b><span>required controls</span></div><div><b>6</b><span>pilot blockers</span></div><div><b>2</b><span>entities reviewed</span></div></section>
+          <section className="plan-summary panel"><div><p className="eyebrow">Customized report</p><h2>{profile.name} {profile.stage.toLowerCase()} review</h2><p>{assessment?.editable_facts.length ?? 0} core facts · {assessment?.source_summary.evidence_items_supplied ?? 0} evidence references · Updated 17 Oct 2026</p></div><div className="plan-score"><strong>{assessment?.plan.evidence_readiness ?? 42}</strong><span>/100<br />evidence ready</span></div><div className="plan-actions"><button className="secondary-button" onClick={() => setGenerated(false)}>Edit facts</button><button className="button button-dark" onClick={() => notify("Customer-ready report prepared for export")}>Export report</button></div></section>
+          <section className="plan-banner"><div><b>{currentFrameworks.length}</b><span>candidate frameworks</span></div><div><b>{assessment?.risk_signals.length ?? 0}</b><span>risk signals</span></div><div><b>{currentBlockers.length}</b><span>stage blockers</span></div><div><b>{regions.length}</b><span>regions reviewed</span></div></section>
 
           <section className="report-builder panel">
             <div className="report-builder-copy"><p className="eyebrow">Report settings</p><h2>Customize this plan</h2><p>Choose the audience and sections. The report stays linked to the approved rulebook.</p></div>
@@ -640,50 +718,41 @@ function Assessment({ notify }: { notify: (message: string) => void }) {
           </section>
 
           <section className="report-overview panel">
-            <div className="report-overview-head"><div><p className="eyebrow">Executive summary</p><h2>AI-assisted credit workflow across EU and US entities</h2></div><Badge tone="red">Pilot blocked</Badge></div>
-            <p>{profile.name} is a draft-only assistant proposed for ten credit analysts and up to 100 applications per entity. It uses customer credit history to prepare factual memos, but officers must verify sources and the credit committee retains every lending decision. Aster EU and Aster US Lending require separate approvals.</p>
-            <div className="report-fact-grid"><div><span>Product role</span><b>Deployer / lender</b></div><div><span>Lifecycle</span><b>{profile.stage}</b></div><div><span>Primary users</span><b>{profile.users}</b></div><div><span>Accountable owner</span><b>{profile.owner}</b></div><div><span>Assessment confidence</span><b>{autofillConfidence}%</b></div><div><span>Target pilot</span><b>15 Jan 2027</b></div></div>
-            <div className="report-conclusion"><span>Decision</span><p>Do not begin a customer-data pilot yet. Current evidence shows stale-record retrieval, an omitted dispute, an unapproved endpoint, and 365-day prompt retention. Version-matched model validation and effective human-review evidence are also missing.</p></div>
+            <div className="report-overview-head"><div><p className="eyebrow">Executive summary</p><h2>{isAsterDemo ? "AI-assisted credit workflow across EU and US entities" : `${profile.name} · ${regions.join(" and ") || "deployment scope to confirm"}`}</h2></div><Badge tone={assessment?.plan.decision === "do_not_launch" ? "red" : "amber"}>{assessment?.plan.decision === "do_not_launch" ? `${profile.stage} blocked` : "Conditions open"}</Badge></div>
+            <p>{reportSummary}</p>
+            <div className="report-fact-grid"><div><span>Product role</span><b>{isAsterDemo ? "Deployer / lender" : "Confirm role"}</b></div><div><span>Lifecycle</span><b>{profile.stage}</b></div><div><span>Primary users</span><b>{profile.users}</b></div><div><span>Accountable owner</span><b>{profile.owner}</b></div><div><span>Assessment confidence</span><b>{autofillConfidence}%</b></div><div><span>Target date</span><b>{isAsterDemo ? "15 Jan 2027" : "Not supplied"}</b></div></div>
+            <div className="report-conclusion"><span>Stage decision</span><p>{reportDecision}. This is a decision-support draft; final scope and approval remain with qualified legal, privacy, security, model-risk, and business owners.</p></div>
           </section>
 
           {reportSections.applicability && <section className="panel report-detail-card">
             <div className="panel-heading"><div><p className="eyebrow">Applicability</p><h2>Scoped legal decisions</h2></div><Badge tone="amber">Local confirmation needed</Badge></div>
             <div className="applicability-table">
               <div className="applicability-head"><span>Regime</span><span>Decision</span><span>Why it applies</span><span>Confidence</span></div>
-              {[
-                ["EU AI Act", "Classify", "Assess the scoring model, memo LLM, and integrated influence on credit decisions separately.", "86%", "amber"],
-                ["EU privacy", "In scope", "Customer credit data, vendor processing, minimization, retention, rights, and DPIA duties apply.", "96%", "green"],
-                ["US credit laws", "In scope", "FCRA and ECOA analysis is needed for purpose, records, explanations, and model use.", "94%", "green"],
-                ["New York rules", "Confirm", "Nonbank licensing, privacy, security, and retention mapping remains entity specific.", "74%", "blue"],
-              ].map(([regime, decision, reason, confidence, tone]) => <div className="applicability-row" key={regime}><b>{regime}</b><Badge tone={tone as Tone}>{decision}</Badge><p>{reason}</p><strong>{confidence}</strong></div>)}
+              {currentFrameworks.map((framework, index) => <div className="applicability-row" key={framework.name}><b>{framework.name}</b><Badge tone={framework.status === "recommended" ? "blue" : "amber"}>{framework.status === "recommended" ? "Map" : "Confirm"}</Badge><p>{framework.rationale} {framework.validation}</p><strong>{framework.status === "recommended" ? "90%" : `${Math.max(72, 88 - index * 4)}%`}</strong></div>)}
             </div>
           </section>}
 
           {reportSections.roadmap && <section className="panel report-detail-card">
             <div className="panel-heading"><div><p className="eyebrow">Implementation</p><h2>Path to pilot decision</h2></div><Badge tone="blue">6 workstreams</Badge></div>
-            <div className="roadmap-grid">
-              <div><span className="roadmap-day">0–30 days</span><h3>Stop known failures</h3><ul><li><b>Disable 365-day prompt retention</b><small>Owner · Security / vendor</small></li><li><b>Fix freshness and dispute handling</b><small>Owner · Credit data</small></li></ul><em>Gate · Passing negative and version tests</em></div>
-              <div><span className="roadmap-day">31–60 days</span><h3>Complete legal and model work</h3><ul><li><b>Approve entity mappings and schedules</b><small>Owner · Compliance / legal</small></li><li><b>Validate scoring v5 and memo LLM</b><small>Owner · Model risk</small></li></ul><em>Gate · Independent review accepted</em></div>
-              <div><span className="roadmap-day">Before pilot</span><h3>Prove operations</h3><ul><li><b>Test officer intervention and rejection</b><small>Owner · Credit Operations</small></li><li><b>Run incident and recovery tabletop</b><small>Owner · Compliance / IR</small></li></ul><em>Gate · Scoped written release decision</em></div>
-            </div>
+            <div className="roadmap-grid">{roadmapGroups.map((items, index) => <div key={index}><span className="roadmap-day">{["Now", "Next", `Before ${profile.stage.toLowerCase()}`][index]}</span><h3>{["Close known gaps", "Complete specialist review", "Prove operating controls"][index]}</h3><ul>{items.map((item) => <li key={item.id}><b>{item.title}</b><small>Owner · {item.owner}</small></li>)}</ul><em>Gate · {items.length ? items.map((item) => item.evidence_needed).join("; ") : "Written scoped approval"}</em></div>)}</div>
           </section>}
 
           <div className="report-two-column">
             {reportSections.evidence && <section className="panel report-detail-card">
               <div className="panel-heading"><div><p className="eyebrow">Evidence plan</p><h2>Proof to collect</h2></div><Badge tone="amber">7 items</Badge></div>
-              <div className="evidence-plan-list"><div><span>01</span><p><b>Current-record retrieval</b><small>Cache invalidation, correction, dispute, and revised-memo tests</small></p><Badge tone="red">Failing</Badge></div><div><span>02</span><p><b>Vendor boundary</b><small>Approved endpoint, transient retention, terms, and payload test</small></p><Badge tone="red">Conflict</Badge></div><div><span>03</span><p><b>Component validation</b><small>Scoring v5 validation and separate memo-LLM evaluation</small></p><Badge tone="red">Missing</Badge></div><div><span>04</span><p><b>Officer oversight</b><small>Source inspection, edit, rejection, permissions, and escalation test</small></p><Badge tone="amber">Designed</Badge></div></div>
+              <div className="evidence-plan-list">{currentBlockers.slice(0, 4).map((item, index) => <div key={item.id}><span>{String(index + 1).padStart(2, "0")}</span><p><b>{item.title}</b><small>{item.evidence_needed}</small></p><Badge tone="red">Needed</Badge></div>)}</div>
             </section>}
             {reportSections.questions && <section className="panel report-detail-card">
               <div className="panel-heading"><div><p className="eyebrow">Before approval</p><h2>Open questions</h2></div><Badge tone="amber">3 decisions</Badge></div>
-              <div className="question-list"><label><input type="checkbox" />What actual influence do the score and draft memo have on the credit decision?</label><label><input type="checkbox" />Which Irish and New York record schedules apply to each copy?</label><label><input type="checkbox" />Are vendor regions, subprocessors, support access, transfers, and terms approved per entity?</label></div>
+              <div className="question-list"><label><input type="checkbox" />Which human or system makes the final consequential decision?</label><label><input type="checkbox" />Are the deployment entities, users, and affected people confirmed for every region?</label><label><input type="checkbox" />Which controls are operating today, and which are only proposed?</label></div>
               <div className="assumption-box"><span>Scope boundary</span><p>Approval would cover only the named entity, dataset, environment, limits, and component versions. It would not authorize autonomous underwriting, wider data access, external notices, or regulatory filing.</p></div>
             </section>}
           </div>
 
-          <section className="panel checklist-panel"><div className="panel-heading"><div><p className="eyebrow">Priority workplan</p><h2>Pilot blockers</h2></div><Badge tone="red">{6 - completed.length} open</Badge></div>
-            {checklist.map(([id, title, due, evidence, sources]) => {
+          <section className="panel checklist-panel"><div className="panel-heading"><div><p className="eyebrow">Priority workplan</p><h2>{profile.stage} blockers</h2></div><Badge tone="red">{currentBlockers.length - completed.length} open</Badge></div>
+            {currentBlockers.map(({ id, title, owner, evidence_needed }) => {
               const done = completed.includes(id);
-              return <button key={id} className={`checklist-row ${done ? "done" : ""}`} onClick={() => setCompleted((current) => done ? current.filter((x) => x !== id) : [...current, id])}><span className="task-check">{done ? "✓" : ""}</span><span><small>{id}</small><b>{title}</b><em>Why it applies: customer credit data and consequential-decision support</em></span><span><small>Target</small><b>{due}</b></span><span><small>Evidence</small><b>{evidence}</b></span><span><small>Sources</small><b>{sources}</b></span></button>;
+              return <button key={id} className={`checklist-row ${done ? "done" : ""}`} onClick={() => setCompleted((current) => done ? current.filter((x) => x !== id) : [...current, id])}><span className="task-check">{done ? "✓" : ""}</span><span><small>{id}</small><b>{title}</b><em>Evidence gap tied to the current product facts</em></span><span><small>Target</small><b>Before {profile.stage.toLowerCase()}</b></span><span><small>Evidence</small><b>{evidence_needed}</b></span><span><small>Owner</small><b>{owner}</b></span></button>;
             })}
           </section>
         </div>

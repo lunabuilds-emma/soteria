@@ -1,0 +1,21 @@
+{
+  "name": "soteria",
+  "version": "0.1.0",
+  "description": "Evidence-aware AI regulatory compliance intake, autofill, applicability triage, and launch planning.",
+  "author": {
+    "name": "Emma Pan",
+    "url": "https://github.com/lunabuilds-emma"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Soteria",
+    "shortDescription": "Assess AI products against evidence and regulatory scope.",
+    "longDescription": "Soteria turns product specifications, links, responsible-AI standards, and evidence references into editable facts, an autofill confidence score, candidate frameworks, blockers, and an owned compliance plan.",
+    "developerName": "Emma Pan",
+    "category": "Productivity",
+    "capabilities": ["Read"],
+    "websiteURL": "https://aegis-ai-compliance.emmapan31.chatgpt.site",
+    "brandColor": "#173328",
+    "defaultPrompt": "Assess this AI product with Soteria. Extract editable facts, show autofill confidence, identify candidate frameworks and evidence gaps, then give me a stage-specific plan."
+  }
+}

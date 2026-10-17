@@ -38,3 +38,10 @@ yarn-error.log*
 /.wrangler/
 /outputs/
 /work/
+*.tsbuildinfo
+
+# Local Finder duplicates; the canonical files are tracked above.
+/README 2.md
+/app/globals 2.css
+/app/layout 2.tsx
+/app/page 2.tsx
