@@ -12,7 +12,6 @@ Use Soteria as decision support for product, legal, privacy, security, model-ris
 1. Read the product specifications and policies the user has supplied. Do not claim to have opened a link unless its content is actually available.
 2. Prefer the user's stated facts over inferred facts.
 3. Call `autofill_product_assessment` with the source text plus any known product name, purpose, owner, stage, users, deployment regions, capabilities, links, responsible-AI standards, evidence references, and review focus.
-4. If the user asks for an example or supplies the Aster demo, call `load_aster_demo`.
 
 ## Present the draft
 

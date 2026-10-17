@@ -4,7 +4,9 @@ Soteria is an interactive AI regulatory-compliance workspace. It connects laws t
 
 It also includes a ChatGPT plugin package and a live, read-only MCP endpoint. ChatGPT can autofill a product assessment from supplied source text, return editable facts with confidence, triage candidate frameworks, and generate an evidence-based launch plan.
 
-The included demo uses the fictional **Aster Financial Credit Memo Assistant**. Uploads, links, internal responsible-AI standards, AI autofill, confidence indicators, editable product facts, applicability analysis, evidence gaps, and a stage-specific pilot decision are all represented in the browser experience.
+Each assessment starts empty and uses the submitted product. The uploader reads searchable PDFs, DOCX, text, Markdown, JSON, CSV, and HTML. Unreadable files show per-file errors. Links are stored as references; paste their contents to analyze them.
+
+Autofill currently uses source extraction and rules, with editable facts, source excerpts, and heuristic confidence estimates. No external language-model service is configured. Scanned PDFs require OCR before upload.
 
 ## Run locally
 
@@ -26,13 +28,13 @@ npm run lint
 
 ## Demo scope
 
-The Aster example is fictional and uses synthetic-only evidence. The tailored report intentionally blocks the proposed customer-data pilot until six control and evidence workstreams are complete. It is a product demonstration, not legal advice or certification.
+The report uses the submitted facts and updates scope and tasks after user corrections. Framework mappings require qualified review.
 
 Key files:
 
 - `app/page.tsx` — interactive product
 - `app/globals.css` — visual system and responsive layout
-- `examples/aster-submission.md` — compact source submission used by the demo
+- `lib/read-document.ts` — PDF, Word, and text readers
 - `app/mcp/route.ts` — hosted ChatGPT tool endpoint
 - `plugins/soteria` — portable ChatGPT and Codex plugin package
 - `.openai/hosting.json` — Sites deployment configuration

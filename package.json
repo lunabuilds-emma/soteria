@@ -16,6 +16,8 @@
   "dependencies": {
     "@modelcontextprotocol/server": "^2.2.0",
     "drizzle-orm": "0.45.2",
+    "mammoth": "^1.13.0",
+    "pdfjs-dist": "^6.4.299",
     "react": "19.2.6",
     "react-dom": "19.2.6",
     "zod": "^4.6.5"

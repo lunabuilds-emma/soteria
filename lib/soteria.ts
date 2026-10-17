@@ -30,6 +30,7 @@ type EditableFact = {
   value: string | string[];
   confidence: number;
   needs_review: boolean;
+  source_excerpt?: string;
 };
 
 type Framework = {
@@ -73,9 +74,9 @@ const trim = (value?: string) => value?.trim() ?? "";
 
 function lineValue(text: string, labels: string[]): string {
   for (const label of labels) {
-    const expression = new RegExp(`^\\s*${label}\\s*:\\s*(.+)$`, "im");
+    const expression = new RegExp(`^\\s*(?:#{1,6}\\s*)?(?:[-*]\\s+)?(?:\\*{1,2})?${label}(?:\\*{1,2})?\\s*(?::|[–—-]|\\n)\\s*(?:\\*{1,2})?([^\\n]+)`, "im");
     const match = text.match(expression);
-    if (match?.[1]) return match[1].trim();
+    if (match?.[1]) return match[1].replace(/\*{1,2}$/, "").trim();
   }
   return "";
 }
@@ -89,7 +90,7 @@ function inferCapabilities(text: string): Capability[] {
   const inferred: Capability[] = [];
   if (/generative|llm|language model|draft|synthetic content/.test(value)) inferred.push("generative_ai");
   if (/customer|consumer|personal data|credit history|patient|record/.test(value)) inferred.push("customer_data");
-  if (/credit|lending|eligibility|consequential|underwriting|housing|education/.test(value)) inferred.push("consequential_decisions");
+  if (/credit|lending|eligibility|consequential|underwriting|housing|education|rank.*candidate|screen.*candidate/.test(value)) inferred.push("consequential_decisions");
   if (/employment|candidate|employee|hiring/.test(value)) inferred.push("employment");
   if (/biometric|facial recognition|voiceprint|fingerprint/.test(value)) inferred.push("biometrics");
   if (/child|children|minor|student under 18/.test(value)) inferred.push("children");
@@ -116,7 +117,7 @@ function inferRegions(text: string): string[] {
 }
 
 function resolveInput(input: AssessmentInput) {
-  const source = trim(input.source_text);
+  const source = trim(input.source_text).replace(/"([A-Za-z _]+)"\s*:\s*"([^"\n]+)"/g, (_match, key: string, value: string) => `\n${key.replaceAll("_", " ")}: ${value}\n`).replace(/\r\n/g, "\n");
   const combined = [
     source,
     input.product_name,
@@ -131,14 +132,17 @@ function resolveInput(input: AssessmentInput) {
     .filter(Boolean)
     .join("\n");
 
-  const isAster = /aster financial|aster credit memo/i.test(combined);
-  const productName = trim(input.product_name) || lineValue(source, ["Product", "System(?: name)?"]) || (isAster ? "Aster Credit Memo Assistant" : "Unnamed AI product");
-  const purpose = trim(input.purpose) || lineValue(source, ["Intended purpose", "Purpose", "Use case"]) || (isAster ? "Draft factual consumer credit memos from authorized repayment history for officer review." : "Purpose not yet documented");
-  const owner = trim(input.owner) || lineValue(source, ["Owner", "Accountable owner"]) || (isAster ? "Chief Risk Officer" : "Owner not assigned");
-  const stage = trim(input.stage) || lineValue(source, ["Stage", "Lifecycle"]) || (/pilot|proof of concept|\bpoc\b/i.test(source) ? "Pilot" : /production|deployed|live/i.test(source) ? "Production" : "Design");
-  const users = trim(input.users) || lineValue(source, ["Users", "Primary users"]) || (isAster ? "Credit analysts and credit officers" : "Users not documented");
+  const proseName = source.match(/(?:^|\n)\s*([A-Z][A-Za-z0-9 &'-]{1,70}?)\s+is\s+(?:an? |the )/m)?.[1];
+  const heading = source.match(/^#\s+([^\n]+)/m)?.[1]?.replace(/\s*[—–|:].*$/, "").replace(/\s+(?:product specification|technical specification|specification|PRD|spec)$/i, "").trim();
+  const documentTitle = source.match(/^Document:\s*(.+)\.(?:pdf|docx|md|txt)/im)?.[1]?.replace(/[_-]+/g, " ").replace(/\s+(?:spec|prd|v\d+)$/i, "").trim();
+  const productName = trim(input.product_name) || lineValue(source, ["Product(?: name)?", "System(?: name)?", "Application(?: name)?", "Project(?: name)?", "Tool name"]) || proseName || heading || documentTitle || "";
+  const purpose = trim(input.purpose) || lineValue(source, ["Intended purpose", "Purpose", "Use case", "Description", "Overview", "Summary"]) || source.split(/(?<=[.!?])\s+|\n/).map((sentence) => sentence.trim()).find((sentence) => sentence.length > 35 && sentence.length < 700 && /\b(?:is (?:an?|the)|helps?|enables?|designed to|allows?|provides?|automates?)\b/i.test(sentence) && !sentence.startsWith("Document:")) || "";
+  const owner = trim(input.owner) || lineValue(source, ["(?:Primary |Product |Accountable )?owner", "Owning team", "Team", "Accountable[_ ]owner"]);
+  const statedStage = trim(input.stage) || lineValue(source, ["(?:Lifecycle )?stage", "Lifecycle", "Status"]);
+  const stage = /production|deployed|live/i.test(statedStage || source) ? "Production" : /pilot|beta|proof of concept|\bpoc\b/i.test(statedStage || source) ? "Pilot" : "Design";
+  const users = trim(input.users) || lineValue(source, ["(?:Primary |Target |Intended )?users?", "Audience", "User groups"]) || (source.match(/(?:used by|built for|designed for|users include)\s+([^.!?\n]{3,180})/i)?.[1] ?? "");
   const regions = unique((input.regions?.length ? input.regions : inferRegions(combined)).map((item) => item.trim()).filter(Boolean));
-  const capabilities = unique([...(input.capabilities ?? []), ...inferCapabilities(combined)]);
+  const capabilities = unique(input.capabilities ?? inferCapabilities(combined));
   const evidenceFromText = source.match(/\b(?:RET|VENDOR|CREDIT|REPORT|MR|VALIDATION|REVIEW)-[A-Z0-9-]+\b/g) ?? [];
   const evidence = unique([...(input.evidence_references ?? []), ...evidenceFromText]);
 
@@ -155,7 +159,6 @@ function resolveInput(input: AssessmentInput) {
     standards: unique((input.responsible_ai_standards ?? []).map((item) => item.trim()).filter(Boolean)),
     evidence,
     reviewFocus: trim(input.review_focus),
-    isAster,
   };
 }
 
@@ -225,7 +228,6 @@ function blockersFor(input: ReturnType<typeof resolveInput>): Blocker[] {
   const highImpact = input.capabilities.includes("consequential_decisions") || input.capabilities.includes("employment") || input.capabilities.includes("biometrics");
 
   if (!input.regions.length) blockers.push({ id: "SCOPE-01", title: "Confirm deployment entities and jurisdictions", owner: "Legal / Compliance", evidence_needed: "Entity-by-region deployment map and accountable role classification" });
-  if (input.isAster) blockers.push({ id: "SCOPE-01", title: "Approve entity-specific applicability and pilot scope", owner: "Legal / Compliance", evidence_needed: "Separate signed analysis for Aster EU and Aster US Lending, including role, licensing, privacy, retention, and decision-use scope" });
   if (input.capabilities.includes("customer_data") && (!input.standards.length || /365 day|retention|outside the approved boundary|unapproved endpoint/.test(evidenceText))) {
     blockers.push({ id: "DATA-02", title: "Approve data use, retention, and processing boundaries", owner: "Privacy / Security / Vendor owner", evidence_needed: "Approved data-flow, retention configuration, contract terms, and enforcement test" });
   }
@@ -263,19 +265,13 @@ export function createSoteriaAssessment(rawInput: AssessmentInput): SoteriaAsses
     { field: "users", value: input.users, confidence: fieldConfidence(input.users, Boolean(rawInput.users) || /^(?:users|primary users)\s*:/im.test(source), missing), needs_review: false },
     { field: "regions", value: input.regions, confidence: fieldConfidence(input.regions, Boolean(rawInput.regions?.length) || /^(?:deployment|regions?|jurisdictions?)\s*:/im.test(source), missing), needs_review: false },
     { field: "capabilities", value: input.capabilities, confidence: fieldConfidence(input.capabilities, Boolean(rawInput.capabilities?.length), missing), needs_review: false },
-  ].map((fact) => ({ ...fact, needs_review: fact.confidence < 90 }));
+  ].map((fact) => ({ ...fact, needs_review: fact.confidence < 90, source_excerpt: typeof fact.value === "string" && fact.value && source.includes(fact.value) ? fact.value : undefined }));
 
-  const sourceCoverage = [
-    input.source.length > 80,
-    input.links.length > 0,
-    input.standards.length > 0,
-    input.evidence.length > 0,
-  ].filter(Boolean).length;
   const factScore = facts.reduce((sum, fact) => sum + fact.confidence, 0) / facts.length;
-  const autofillConfidence = Math.min(97, Math.round(factScore * 0.72 + sourceCoverage * 7));
+  const autofillConfidence = Math.round(factScore);
   const blockers = blockersFor(input);
   const signals = riskSignals(input.capabilities);
-  const evidenceReadiness = input.isAster ? 42 : Math.max(18, Math.min(92, Math.round(72 + input.evidence.length * 3 + input.standards.length * 2 - blockers.length * 9)));
+  const evidenceReadiness = Math.max(18, Math.min(92, Math.round(72 + input.evidence.length * 3 + input.standards.length * 2 - blockers.length * 9)));
   const decision = blockers.length >= 4 ? "do_not_launch" : blockers.length > 0 ? "conditional_review" : "continue_documented_review";
   const decisionLabels = {
     do_not_launch: "Do not launch or begin the proposed data pilot yet",
@@ -308,27 +304,3 @@ export function createSoteriaAssessment(rawInput: AssessmentInput): SoteriaAsses
     disclaimer: "Decision-support draft only. Candidate frameworks and controls require review by qualified legal, privacy, security, model-risk, and business owners; this is not legal advice or certification.",
   };
 }
-
-export const asterExampleInput: AssessmentInput = {
-  source_text: `Company: Aster Financial
-Product: Aster Credit Memo Assistant
-Owner: Chief Risk Officer
-Stage: Pilot
-Users: Credit analysts and credit officers
-Intended purpose: Draft factual consumer credit memos from authorized repayment history for officer review; it cannot approve credit or send external notices.
-Deployment: European Union, Ireland, United States, New York.
-The workflow uses a vendor-hosted LLM and customer credit information. A credit committee retains the lending decision.
-Known gaps: a staging cache returned a stale record; a draft omitted a dispute; an unapproved endpoint was used; raw prompts are retained for 365 days; validation covers model v4 instead of v5; human-review intervention and rejection tests are missing; incident and recovery routes are incomplete.
-Evidence: RET-POL-v2, VENDOR-CONFIG-v7, CREDIT-POL-v2, REPORT-v4, CREDIT-TRACE-R, MR-POL-v3, VALIDATION-v4, REVIEW-DESIGN-v1.`,
-  product_name: "Aster Credit Memo Assistant",
-  purpose: "Draft factual consumer credit memos from authorized repayment history for officer review; it cannot approve credit or send external notices.",
-  owner: "Chief Risk Officer",
-  stage: "Pilot",
-  users: "Credit analysts and credit officers",
-  regions: ["European Union", "Ireland", "United States", "New York"],
-  capabilities: ["generative_ai", "customer_data", "consequential_decisions"],
-  spec_links: ["https://risk.aster.example/credit-memo-assistant", "https://policies.aster.example/credit-data"],
-  responsible_ai_standards: ["MR-POL-v3", "RET-POL-v2", "CREDIT-POL-v2"],
-  evidence_references: ["VENDOR-CONFIG-v7", "REPORT-v4", "CREDIT-TRACE-R", "VALIDATION-v4", "REVIEW-DESIGN-v1"],
-  review_focus: "Assess pilot readiness separately for Aster EU and Aster US Lending. Treat proposed controls as untested until evidence is supplied.",
-};

@@ -2,7 +2,6 @@ import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
 
 import {
-  asterExampleInput,
   capabilityValues,
   createSoteriaAssessment,
 } from "../../lib/soteria";
@@ -46,22 +45,6 @@ function buildServer() {
       },
     },
     async (input) => resultFor(createSoteriaAssessment(input)),
-  );
-
-  server.registerTool(
-    "load_aster_demo",
-    {
-      title: "Load the Aster Financial demo",
-      description: "Return Soteria's fictional Aster Credit Memo Assistant example, including editable facts, confidence, candidate frameworks, blockers, evidence readiness, and the pilot decision.",
-      inputSchema: z.object({}),
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
-    },
-    async () => resultFor(createSoteriaAssessment(asterExampleInput)),
   );
 
   server.registerResource(

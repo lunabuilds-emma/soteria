@@ -1,6 +1,8 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { readDocument } from "../lib/read-document";
+import { createSoteriaAssessment, type Capability } from "../lib/soteria";
 
 type ViewId =
   | "overview"
@@ -317,7 +319,7 @@ function Overview({ onNavigate }: { onNavigate: (view: ViewId) => void }) {
         <div className="panel-heading"><div><p className="eyebrow">Products</p><h2>Readiness</h2></div><button className="text-button" onClick={() => onNavigate("assess")}>Assess →</button></div>
         <div className="product-grid">
           {[
-            ["Aster Credit Memo", "AI-assisted credit operations pilot", "High", 42, "6 blockers", "AF"],
+            ["New product", "AI-assisted credit operations pilot", "High", 42, "6 blockers", "AF"],
             ["Talent Lens", "Employment ranking", "High", 61, "6 gaps", "TL"],
             ["Beacon Fraud", "Transaction monitoring", "Limited", 88, "1 gap", "BF"],
             ["Studio Forge", "Media generation", "Transparency", 83, "2 gaps", "SF"],
@@ -442,7 +444,7 @@ function LegalReview({ notify }: { notify: (message: string) => void }) {
   );
 }
 
-type IntakeDocument = { name: string; size: number; text: string; readable: boolean };
+type IntakeDocument = { name: string; size: number; text: string; readable: boolean; error?: string };
 
 type AutofillFact = { field: string; value: string | string[]; confidence: number; needs_review: boolean };
 type AutofillFramework = { name: string; status: "candidate" | "recommended"; rationale: string; validation: string };
@@ -459,30 +461,20 @@ type AutofillAssessment = {
   disclaimer: string;
 };
 
-const demoDocuments: IntakeDocument[] = [
-  { name: "Aster-AI-Compliance-Review-Demo-Submission.md", size: 24700, readable: true, text: "Company: Aster Financial\nProduct: Aster Credit Memo Assistant\nOwner: Chief Risk Officer\nStage: Pilot\nUsers: Credit analysts and credit officers\nIntended purpose: Draft factual consumer credit memos from authorized repayment history for officer review; it cannot approve credit or send external notices.\nDeployment: European Union, Ireland, United States, New York.\nTarget pilot date: 15 January 2027.\nThe pilot is submitted for review and is not approved. It uses a vendor-hosted LLM and customer credit information. A credit committee retains the lending decision." },
-  { name: "VENDOR-CONFIG-v7.txt", size: 4200, readable: true, text: "Fictional enterprise LLM endpoint. Raw prompt payload retention is configured for 365 days, contrary to transient-processing policy RET-POL-v2. Processing regions, subprocessors, support access, transfer safeguards, and signed terms are unconfirmed." },
-  { name: "CREDIT-TRACE-R.json", size: 6800, readable: true, text: "Synthetic staging trace: retrieval returned superseded record v3 while v4 existed; the current dispute was omitted; full report fields reached an unapproved endpoint. This is failing staging evidence, not a production breach." },
-  { name: "VALIDATION-v4.pdf", size: 31800, readable: false, text: "" },
-];
-
-const demoIntake = {
-  links: "https://risk.aster.example/credit-memo-assistant\nhttps://policies.aster.example/credit-data",
-  standards: "RET-POL-v2 · Transient raw-prompt policy\nCREDIT-POL-v2 · Assigned-case access and allowed fields\nMR-POL-v3 · Validation and independent review\nREPORT-POL-v2 · Evidence and submission status",
-  context: "Assess pilot readiness separately for Aster EU and Aster US Lending. Treat proposed controls as untested until evidence is supplied.",
-};
-
 function Assessment({ notify }: { notify: (message: string) => void }) {
   const [generated, setGenerated] = useState(false);
   const [autofillRan, setAutofillRan] = useState(false);
   const [autofillStatus, setAutofillStatus] = useState<"idle" | "analyzing" | "complete">("idle");
+  const [readingFiles, setReadingFiles] = useState(false);
+  const [pastedText, setPastedText] = useState("");
+  const [assessedSource, setAssessedSource] = useState("");
   const [analysisStep, setAnalysisStep] = useState(0);
   const [autofillError, setAutofillError] = useState("");
   const [autofillScore, setAutofillScore] = useState(0);
   const [assessment, setAssessment] = useState<AutofillAssessment | null>(null);
   const [editedFields, setEditedFields] = useState<string[]>([]);
-  const [documents, setDocuments] = useState<IntakeDocument[]>(demoDocuments);
-  const [intake, setIntake] = useState(demoIntake);
+  const [documents, setDocuments] = useState<IntakeDocument[]>([]);
+  const [intake, setIntake] = useState({ links: "", standards: "", context: "" });
   const [profile, setProfile] = useState({
     name: "",
     owner: "",
@@ -503,24 +495,9 @@ function Assessment({ notify }: { notify: (message: string) => void }) {
   const linkCount = intake.links.split("\n").filter((link) => link.trim()).length;
   const autofillConfidence = autofillScore;
   const markEdited = (field: string) => setEditedFields((current) => current.includes(field) ? current : [...current, field]);
-  const loadDemo = () => {
-    setDocuments(demoDocuments);
-    setIntake(demoIntake);
-    setProfile({ name: "", owner: "", purpose: "", stage: "Design", users: "Employees" });
-    setFeatures({ decisions: false, employees: false, generation: false, biometrics: false, minors: false });
-    setRegions([]);
-    setAssessment(null);
-    setAutofillScore(0);
-    setAutofillRan(false);
-    setAutofillStatus("idle");
-    setEditedFields([]);
-    setCompleted([]);
-    setGenerated(false);
-    setAutofillError("");
-    notify("Fictional Aster customer demo loaded");
-  };
   const startBlank = () => {
     setDocuments([]);
+    setPastedText("");
     setIntake({ links: "", standards: "", context: "" });
     setProfile({ name: "", owner: "", purpose: "", stage: "Design", users: "Employees" });
     setFeatures({ decisions: false, employees: false, generation: false, biometrics: false, minors: false });
@@ -538,22 +515,25 @@ function Assessment({ notify }: { notify: (message: string) => void }) {
   const handleDocuments = async (files: FileList | null) => {
     const selected = Array.from(files ?? []);
     if (!selected.length) return;
+    setReadingFiles(true);
+    setAutofillError("");
     const parsed = await Promise.all(selected.map(async (file): Promise<IntakeDocument> => {
-      const readable = /\.(txt|md|json|csv|html?)$/i.test(file.name) || file.type.startsWith("text/");
-      let text = "";
-      if (readable) {
-        try { text = await file.text(); } catch { text = ""; }
+      try {
+        const text = await readDocument(file);
+        return { name: file.name, size: file.size, text, readable: true };
+      } catch (error) {
+        return { name: file.name, size: file.size, text: "", readable: false, error: error instanceof Error ? error.message : "Could not read this file. Try a different format." };
       }
-      return { name: file.name, size: file.size, text, readable: readable && Boolean(text) };
     }));
+    setReadingFiles(false);
     setDocuments((current) => [...current.filter((item) => !parsed.some((next) => next.name === item.name)), ...parsed]);
     setAutofillRan(false);
     setAutofillStatus("idle");
   };
   const runAutofill = async () => {
-    const sourceCount = documents.length + linkCount + (intake.standards.trim() ? 1 : 0);
+    const sourceCount = readableDocuments + (pastedText.trim() ? 1 : 0) + (intake.standards.trim() ? 1 : 0);
     if (!sourceCount) {
-      notify("Add a document, link, or RAI standard first");
+      setAutofillError("Add a readable document or paste your product specification below. Links are saved as references; their contents are not read automatically.");
       return;
     }
     setAutofillStatus("analyzing");
@@ -563,7 +543,7 @@ function Assessment({ notify }: { notify: (message: string) => void }) {
     setAnalysisStep(0);
     const steps = [250, 560, 860].map((delay, index) => window.setTimeout(() => setAnalysisStep(index + 1), delay));
     try {
-      const rawSource = documents.map((document) => `Document: ${document.name}\n${document.readable ? document.text : "[File name captured; full text was not available in this browser demo.]"}`).join("\n\n");
+      const rawSource = [...documents.filter((document) => document.readable).map((document) => `Document: ${document.name}\n${document.text}`), pastedText].filter(Boolean).join("\n\n");
       const response = await fetch("/api/autofill", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -574,9 +554,9 @@ function Assessment({ notify }: { notify: (message: string) => void }) {
           review_focus: intake.context,
         }),
       });
-      if (!response.ok) throw new Error("Assessment request failed");
+      if (!response.ok) { const failure = await response.json().catch(() => ({})); throw new Error(failure.error || "Assessment request failed. Please try again."); }
       const result = await response.json() as AutofillAssessment;
-      await new Promise((resolve) => window.setTimeout(resolve, 1050));
+
       const fact = (field: string) => result.editable_facts.find((item) => item.field === field);
       const capabilities = (fact("capabilities")?.value as string[] | undefined) ?? [];
       const inferredRegions = (fact("regions")?.value as string[] | undefined) ?? [];
@@ -586,7 +566,7 @@ function Assessment({ notify }: { notify: (message: string) => void }) {
         owner: String(fact("owner")?.value ?? ""),
         purpose: String(fact("purpose")?.value ?? ""),
         stage: String(fact("stage")?.value ?? "Design"),
-        users: /both/i.test(inferredUsers) ? "Both" : /analyst|employee|officer|internal|recruiter/i.test(inferredUsers) ? "Employees" : "Consumers",
+        users: inferredUsers,
       });
       setFeatures({
         decisions: capabilities.includes("consequential_decisions"),
@@ -595,7 +575,7 @@ function Assessment({ notify }: { notify: (message: string) => void }) {
         biometrics: capabilities.includes("biometrics"),
         minors: capabilities.includes("children"),
       });
-      setRegions(inferredRegions.length ? inferredRegions.map((region) => region === "Ireland" ? "European Union" : region === "New York" ? "United States" : region).filter((region, index, all) => all.indexOf(region) === index) : []);
+      setRegions(inferredRegions);
       setFieldConfidence({
         name: fact("product_name")?.confidence ?? 0,
         owner: fact("owner")?.confidence ?? 0,
@@ -603,57 +583,66 @@ function Assessment({ notify }: { notify: (message: string) => void }) {
         stage: fact("stage")?.confidence ?? 0,
         users: fact("users")?.confidence ?? 0,
       });
+      setAssessedSource(rawSource);
       setAssessment(result);
       setAutofillScore(result.autofill_confidence);
       setCompleted([]);
       setAutofillRan(true);
       setAutofillStatus("complete");
       notify(`Autofilled ${String(fact("product_name")?.value ?? "product assessment")} from ${sourceCount} sources`);
-    } catch {
+    } catch (error) {
       setAutofillStatus("idle");
-      setAutofillError("Autofill could not complete. Your intake is still here—try again.");
+      setAutofillError(error instanceof Error ? error.message : "Autofill could not complete. Your intake is still here—try again.");
       notify("Autofill could not complete");
     } finally {
       steps.forEach((timer) => window.clearTimeout(timer));
     }
   };
-  const checklist = [
-    ["DATA-01", "Fix current-record retrieval and dispute preservation", "Before pilot", "Version, correction, and revised-memo tests", "EU privacy · US credit"],
-    ["VEN-02", "Correct vendor retention and endpoint controls", "Before pilot", "Config, terms, and enforcement tests", "EU privacy · US privacy"],
-    ["MRM-03", "Validate scoring v5 and evaluate the memo LLM", "Before pilot", "Version-matched validation and review", "EU AI · US fair lending"],
-    ["HUM-04", "Prove meaningful officer review", "Before pilot", "Intervention, rejection, and permission tests", "EU AI · US credit"],
-    ["LAW-05", "Confirm entity-specific duties and schedules", "Before approval", "Legal mapping and retention schedule", "Ireland · New York"],
-    ["INC-06", "Approve incident, reporting, and recovery routes", "Before pilot", "Signed matrix, tabletop, recovery test", "Entity specific"],
-  ];
-  const currentBlockers: AutofillBlocker[] = assessment?.blockers ?? checklist.map(([id, title, , evidence, sources]) => ({ id, title, owner: sources, evidence_needed: evidence }));
-  const currentFrameworks = assessment?.candidate_frameworks ?? [];
-  const isAsterDemo = /aster/i.test(profile.name);
-  const reportSummary = isAsterDemo
-    ? `${profile.name} is a draft-only assistant proposed for credit analysts. It uses customer credit history to prepare factual memos, but officers must verify sources and the credit committee retains every lending decision. Aster EU and Aster US Lending require separate approvals.`
-    : `${profile.name || "This product"} is a ${profile.stage.toLowerCase()}-stage AI system for ${profile.users.toLowerCase()}. ${profile.purpose || "Its intended purpose still needs to be confirmed."} This draft separates extracted facts from candidate legal scope and routes every decision to a human owner.`;
-  const reportDecision = assessment?.plan.decision_label ?? "Complete the named evidence and legal review before launch";
+  const reviewedAssessment = useMemo(() => {
+    if (!assessment) return null;
+    const capabilities: Capability[] = [];
+    if (features.decisions) capabilities.push("consequential_decisions");
+    if (features.employees) capabilities.push("employment");
+    if (features.generation) capabilities.push("generative_ai");
+    if (features.biometrics) capabilities.push("biometrics");
+    if (features.minors) capabilities.push("children");
+    const originalCapabilities = assessment.editable_facts.find((fact) => fact.field === "capabilities")?.value;
+    if (Array.isArray(originalCapabilities) && originalCapabilities.includes("customer_data")) capabilities.push("customer_data");
+    return createSoteriaAssessment({
+      product_name: profile.name, owner: profile.owner, purpose: profile.purpose,
+      stage: profile.stage, users: profile.users, regions, capabilities,
+      source_text: assessedSource,
+      responsible_ai_standards: intake.standards.split("\\n").filter(Boolean),
+    });
+  }, [assessment, assessedSource, profile, features, regions, intake.standards]);
+  const currentBlockers: AutofillBlocker[] = reviewedAssessment?.blockers ?? [];
+  const currentFrameworks = reviewedAssessment?.candidate_frameworks ?? [];
+  const reportSummary = `${profile.name || "This product"} is a ${profile.stage.toLowerCase()}-stage AI system for ${profile.users.toLowerCase()}. ${profile.purpose || "Its intended purpose still needs to be confirmed."}`;
+  const reportDecision = reviewedAssessment?.plan.decision_label ?? "Complete the named evidence and legal review before launch";
   const roadmapGroups = [currentBlockers.slice(0, 2), currentBlockers.slice(2, 4), currentBlockers.slice(4)];
   const analysisLabels = ["Reading source material", "Extracting product facts", "Mapping risk signals", "Building the review plan"];
   return (
     <div className="view-stack">
-      <SectionTitle eyebrow="Assess" title="Product assessment" detail="Show how Soteria turns scattered product evidence into an editable, review-ready decision." action={<Badge tone={generated ? "green" : "purple"}>{generated ? "Report ready" : "Customer demo · Fictional data"}</Badge>} />
+      <SectionTitle eyebrow="Assess" title="Product assessment" detail="Upload your product documents, review the extracted facts, and build your assessment." action={<Badge tone={generated ? "green" : "purple"}>{generated ? "Report ready" : "Your product · Draft"}</Badge>} />
       {!generated ? (
         <>
         <section className="ai-intake panel">
           <div className="ai-intake-heading">
             <div className="ai-intake-title"><span className="ai-spark">✦</span><div><p className="eyebrow">AI autofill</p><h2>From source material to review-ready facts</h2><p>Upload specs, add product links and internal standards, then review every extracted answer and its confidence.</p></div></div>
-            <div className="demo-actions"><button className="secondary-button" onClick={loadDemo}>Load Aster demo</button><button className="secondary-button" onClick={startBlank}>Try my product</button>{autofillRan && <div className="autofill-score"><div><strong>{autofillConfidence}</strong><span>%</span></div><small>Extraction confidence</small></div>}</div>
+            <div className="demo-actions"><button className="secondary-button" onClick={startBlank}>New assessment</button>{autofillRan && <div className="autofill-score"><div><strong>{autofillConfidence}</strong><span>%</span></div><small title="Estimated confidence from source matching and missing facts. This is not a probability of correctness.">Source confidence</small></div>}</div>
           </div>
           <div className="intake-source-grid">
             <div className="intake-source-card">
               <div className="source-card-head"><span className="source-type-icon">▤</span><div><b>Documents</b><small>Specs, model cards, DPIAs</small></div></div>
-              <label className="upload-drop">+ Add files<input type="file" multiple accept=".pdf,.doc,.docx,.txt,.md,.json,.csv" onChange={(event) => { void handleDocuments(event.target.files); event.target.value = ""; }} /></label>
+              <label className="upload-drop">{readingFiles ? "Reading files…" : "+ Add files"}<input type="file" multiple disabled={readingFiles || autofillStatus === "analyzing"} accept=".pdf,.docx,.txt,.md,.json,.csv,.html" onChange={(event) => { void handleDocuments(event.target.files); event.target.value = ""; }} /></label>
               <div className="document-chips">
-                {documents.length ? documents.map((document) => <span key={document.name}>{document.name}<i className={document.readable ? "read" : "name-only"}>{document.readable ? "full text" : "name only"}</i><button aria-label={`Remove ${document.name}`} onClick={() => { setDocuments((current) => current.filter((item) => item.name !== document.name)); setAutofillRan(false); setAutofillStatus("idle"); setAssessment(null); }}>×</button></span>) : <small>No documents selected</small>}
+                {documents.length ? documents.map((document) => <span key={document.name} title={document.error || document.name}>{document.name}<i className={document.readable ? "read" : "name-only"}>{document.readable ? `${document.text.length.toLocaleString()} characters read` : "could not read"}</i><button aria-label={`Remove ${document.name}`} onClick={() => { setDocuments((current) => current.filter((item) => item.name !== document.name)); setAutofillRan(false); setAutofillStatus("idle"); setAssessment(null); }}>×</button></span>) : <small>No documents selected</small>}
               </div>
+              {documents.filter((document) => !document.readable).map((document) => <p className="file-read-error" key={document.name}><b>{document.name}:</b> {document.error}</p>)}
+              <small className="source-help">PDF, DOCX, TXT, Markdown, JSON, CSV · 20 MB per file</small>
             </div>
             <label className="intake-source-card source-field" htmlFor="assessment-links" aria-label="Documentation links">
-              <span className="source-card-head"><span className="source-type-icon">↗</span><span><b>Links</b><small>Docs, wikis, repositories</small></span></span>
+              <span className="source-card-head"><span className="source-type-icon">↗</span><span><b>Links</b><small>References only · paste content below to analyze</small></span></span>
               <textarea id="assessment-links" value={intake.links} onChange={(event) => { setIntake((current) => ({ ...current, links: event.target.value })); setAutofillRan(false); setAutofillStatus("idle"); }} placeholder="Paste one URL per line…" />
             </label>
             <label className="intake-source-card source-field" htmlFor="assessment-standards" aria-label="Responsible AI standards">
@@ -661,23 +650,25 @@ function Assessment({ notify }: { notify: (message: string) => void }) {
               <textarea id="assessment-standards" value={intake.standards} onChange={(event) => { setIntake((current) => ({ ...current, standards: event.target.value })); setAutofillRan(false); setAutofillStatus("idle"); }} placeholder="Name or paste relevant internal standards…" />
             </label>
           </div>
+          <label className="paste-source source-field"><b>Product specification or additional context</b><textarea value={pastedText} onChange={(event) => { setPastedText(event.target.value); setAutofillRan(false); setAssessment(null); }} placeholder="Paste a product description, specification, model card, or content from a private link…" /></label>
           <div className="intake-instructions">
             <label><span>Instructions <em>Optional</em></span><input value={intake.context} onChange={(event) => { setIntake((current) => ({ ...current, context: event.target.value })); setAutofillRan(false); setAutofillStatus("idle"); }} placeholder="What should the AI prioritize?" /></label>
-            <button className={`button button-dark autofill-button ${autofillStatus === "analyzing" ? "loading" : ""}`} disabled={autofillStatus === "analyzing"} onClick={() => { void runAutofill(); }}><span>{autofillStatus === "analyzing" ? "◌" : "✦"}</span>{autofillStatus === "analyzing" ? analysisLabels[analysisStep] : autofillRan ? "Run autofill again" : "Autofill assessment"}</button>
+            <button className={`button button-dark autofill-button ${autofillStatus === "analyzing" ? "loading" : ""}`} disabled={readingFiles || autofillStatus === "analyzing"} onClick={() => { void runAutofill(); }}><span>{autofillStatus === "analyzing" ? "◌" : "✦"}</span>{autofillStatus === "analyzing" ? analysisLabels[analysisStep] : autofillRan ? "Run autofill again" : "Autofill assessment"}</button>
           </div>
           {autofillStatus === "analyzing" && <div className="analysis-progress" aria-live="polite">{analysisLabels.map((label, index) => <span key={label} className={index < analysisStep ? "done" : index === analysisStep ? "active" : ""}><i>{index < analysisStep ? "✓" : index + 1}</i>{label}</span>)}</div>}
           {autofillError && <div className="autofill-error" role="alert"><b>Autofill paused</b><span>{autofillError}</span><button onClick={() => { void runAutofill(); }}>Retry</button></div>}
           {autofillRan && <div className="autofill-result">
-            <div className="result-summary"><span className="result-check">✓</span><span><b>{assessment?.editable_facts.length ?? 0} core facts extracted</b><small>{documents.length + linkCount + (intake.standards.trim() ? 1 : 0)} sources supplied · {readableDocuments} full-text</small></span></div>
-            <div className="confidence-breakdown"><span><i style={{ width: `${Math.round((fieldConfidence.name + fieldConfidence.owner + fieldConfidence.purpose) / 3)}%` }} /><b>Product profile</b><em>{Math.round((fieldConfidence.name + fieldConfidence.owner + fieldConfidence.purpose) / 3)}%</em></span><span><i style={{ width: `${Math.max(64, autofillConfidence - 7)}%` }} /><b>Risk attributes</b><em>{Math.max(64, autofillConfidence - 7)}%</em></span><span><i style={{ width: `${regions.length > 1 ? 91 : 68}%` }} /><b>Deployment scope</b><em>{regions.length > 1 ? "91%" : "68%"}</em></span></div>
+            <div className="result-summary"><span className="result-check">✓</span><span><b>{assessment?.editable_facts.length ?? 0} core facts extracted</b><small>{readableDocuments} documents read{pastedText.trim() ? " · pasted text analyzed" : ""} · {linkCount} reference links</small></span></div>
+            <div className="confidence-breakdown"><span><i style={{ width: `${Math.round((fieldConfidence.name + fieldConfidence.owner + fieldConfidence.purpose) / 3)}%` }} /><b>Product profile</b><em>{Math.round((fieldConfidence.name + fieldConfidence.owner + fieldConfidence.purpose) / 3)}%</em></span><span><i style={{ width: `${assessment?.editable_facts.find((fact) => fact.field === "capabilities")?.confidence ?? 0}%` }} /><b>Risk attributes</b><em>{Math.max(64, autofillConfidence - 7)}%</em></span><span><i style={{ width: `${assessment?.editable_facts.find((fact) => fact.field === "regions")?.confidence ?? 0}%` }} /><b>Deployment scope</b><em>{assessment?.editable_facts.find((fact) => fact.field === "regions")?.confidence ?? 0}%</em></span></div>
             <p>Editable draft · {assessment?.blockers.length ?? 0} evidence gaps found · human approval required</p>
           </div>}
         </section>
         <div className="assessment-layout">
           <section className="assessment-form panel">
             <div className="step-label"><span>1</span><div><b>Product profile</b><small>Describe the system and its use</small></div></div>
-            <div className="form-grid"><label><span>Product name {autofillRan && <em className={editedFields.includes("name") ? "ai-field-tag edited" : fieldConfidence.name < 80 ? "ai-field-tag review" : "ai-field-tag"}>{editedFields.includes("name") ? "Edited by you" : `AI filled · ${fieldConfidence.name}%`}</em>}</span><input value={profile.name} placeholder="Product name" onChange={(event) => { markEdited("name"); setProfile((current) => ({ ...current, name: event.target.value })); }} /></label><label><span>Primary owner {autofillRan && <em className={editedFields.includes("owner") ? "ai-field-tag edited" : fieldConfidence.owner < 80 ? "ai-field-tag review" : "ai-field-tag"}>{editedFields.includes("owner") ? "Edited by you" : `AI filled · ${fieldConfidence.owner}%`}</em>}</span><input value={profile.owner} placeholder="Owning team" onChange={(event) => { markEdited("owner"); setProfile((current) => ({ ...current, owner: event.target.value })); }} /></label><label className="wide"><span>Intended purpose {autofillRan && <em className={editedFields.includes("purpose") ? "ai-field-tag edited" : fieldConfidence.purpose < 80 ? "ai-field-tag review" : "ai-field-tag"}>{editedFields.includes("purpose") ? "Edited by you" : `${fieldConfidence.purpose < 80 ? "Confirm" : "AI filled"} · ${fieldConfidence.purpose}%`}</em>}</span><textarea value={profile.purpose} placeholder="What does the system do?" onChange={(event) => { markEdited("purpose"); setProfile((current) => ({ ...current, purpose: event.target.value })); }} /></label><label><span>Lifecycle stage {autofillRan && <em className={editedFields.includes("stage") ? "ai-field-tag edited" : fieldConfidence.stage < 80 ? "ai-field-tag review" : "ai-field-tag"}>{editedFields.includes("stage") ? "Edited by you" : `AI filled · ${fieldConfidence.stage}%`}</em>}</span><select value={profile.stage} onChange={(event) => { markEdited("stage"); setProfile((current) => ({ ...current, stage: event.target.value })); }}><option>Design</option><option>Pilot</option><option>Production</option></select></label><label><span>Primary users {autofillRan && <em className={editedFields.includes("users") ? "ai-field-tag edited" : fieldConfidence.users < 80 ? "ai-field-tag review" : "ai-field-tag"}>{editedFields.includes("users") ? "Edited by you" : `AI filled · ${fieldConfidence.users}%`}</em>}</span><select value={profile.users} onChange={(event) => { markEdited("users"); setProfile((current) => ({ ...current, users: event.target.value })); }}><option>Consumers</option><option>Employees</option><option>Both</option></select></label></div>
+            <div className="form-grid"><label><span>Product name {autofillRan && <em className={editedFields.includes("name") ? "ai-field-tag edited" : fieldConfidence.name < 80 ? "ai-field-tag review" : "ai-field-tag"}>{editedFields.includes("name") ? "Edited by you" : `Extracted · ${fieldConfidence.name}%`}</em>}</span><input value={profile.name} placeholder="Product name" onChange={(event) => { markEdited("name"); setProfile((current) => ({ ...current, name: event.target.value })); }} /></label><label><span>Primary owner {autofillRan && <em className={editedFields.includes("owner") ? "ai-field-tag edited" : fieldConfidence.owner < 80 ? "ai-field-tag review" : "ai-field-tag"}>{editedFields.includes("owner") ? "Edited by you" : `Extracted · ${fieldConfidence.owner}%`}</em>}</span><input value={profile.owner} placeholder="Owning team" onChange={(event) => { markEdited("owner"); setProfile((current) => ({ ...current, owner: event.target.value })); }} /></label><label className="wide"><span>Intended purpose {autofillRan && <em className={editedFields.includes("purpose") ? "ai-field-tag edited" : fieldConfidence.purpose < 80 ? "ai-field-tag review" : "ai-field-tag"}>{editedFields.includes("purpose") ? "Edited by you" : `${fieldConfidence.purpose < 80 ? "Confirm" : "Extracted"} · ${fieldConfidence.purpose}%`}</em>}</span><textarea value={profile.purpose} placeholder="What does the system do?" onChange={(event) => { markEdited("purpose"); setProfile((current) => ({ ...current, purpose: event.target.value })); }} /></label><label><span>Lifecycle stage {autofillRan && <em className={editedFields.includes("stage") ? "ai-field-tag edited" : fieldConfidence.stage < 80 ? "ai-field-tag review" : "ai-field-tag"}>{editedFields.includes("stage") ? "Edited by you" : `Extracted · ${fieldConfidence.stage}%`}</em>}</span><select value={profile.stage} onChange={(event) => { markEdited("stage"); setProfile((current) => ({ ...current, stage: event.target.value })); }}><option>Design</option><option>Pilot</option><option>Production</option></select></label><label><span>Primary users {autofillRan && <em className={editedFields.includes("users") ? "ai-field-tag edited" : fieldConfidence.users < 80 ? "ai-field-tag review" : "ai-field-tag"}>{editedFields.includes("users") ? "Edited by you" : `Extracted · ${fieldConfidence.users}%`}</em>}</span><input value={profile.users} placeholder="Who uses this product?" onChange={(event) => { markEdited("users"); setProfile((current) => ({ ...current, users: event.target.value })); }} /></label></div>
             {autofillRan && <div className="source-trace"><div><span>Source trail</span><b>{documents.filter((document) => document.readable).map((document) => document.name).slice(0, 2).join(" · ") || "Manual intake"}</b></div><div><span>Needs confirmation</span><b>{assessment?.editable_facts.filter((fact) => fact.needs_review).map((fact) => fact.field.replaceAll("_", " ")).join(" · ") || "No low-confidence core facts"}</b></div></div>}
+            {autofillRan && <details className="extraction-details"><summary>View extracted source passages</summary>{assessment?.editable_facts.map((fact) => <p key={fact.field}><b>{fact.field.replaceAll("_", " ")}</b><span>{(fact as AutofillFact & { source_excerpt?: string }).source_excerpt || "Inferred from source context — confirm this field."}</span></p>)}</details>}
             <div className="step-label"><span>2</span><div><b>Risk-relevant attributes</b><small>Select every behavior that applies</small></div></div>
             <div className="toggle-grid">
               {[
@@ -691,8 +682,8 @@ function Assessment({ notify }: { notify: (message: string) => void }) {
               ))}
             </div>
             <div className="step-label"><span>3</span><div><b>Deployment footprint</b><small>Where users and affected people are located</small></div></div>
-            <div className="region-chips">{["European Union", "United States", "South Korea", "China", "United Kingdom"].map((region) => <button key={region} className={regions.includes(region) ? "selected" : ""} onClick={() => toggleRegion(region)}>{region} {regions.includes(region) ? "✓" : "+"}</button>)}</div>
-            <button className="button button-dark generate" disabled={!profile.name || !profile.purpose} onClick={() => { setGenerated(true); notify("Tailored compliance plan generated"); }}>Generate tailored plan <span>→</span></button>
+            <div className="region-chips">{Array.from(new Set(["European Union", "United States", "South Korea", "China", "United Kingdom", ...regions])).map((region) => <button key={region} className={regions.includes(region) ? "selected" : ""} onClick={() => toggleRegion(region)}>{region} {regions.includes(region) ? "✓" : "+"}</button>)}</div>
+            <button className="button button-dark generate" disabled={!assessment || !autofillRan || !profile.name || !profile.purpose} onClick={() => { setGenerated(true); notify("Tailored compliance plan generated"); }}>Generate tailored plan <span>→</span></button>
           </section>
           <aside className="assessment-insight panel">
             <p className="eyebrow">Live scope preview</p><h2>{autofillRan ? "Candidate obligations" : "Ready for intake"}</h2><p>{autofillRan ? `Soteria found ${currentFrameworks.length} frameworks to validate and ${currentBlockers.length} evidence gaps to close.` : "Run autofill to separate extracted product facts from candidate regulatory scope."}</p>
@@ -704,7 +695,7 @@ function Assessment({ notify }: { notify: (message: string) => void }) {
         </>
       ) : (
         <div className="plan-layout">
-          <section className="plan-summary panel"><div><p className="eyebrow">Customized report</p><h2>{profile.name} {profile.stage.toLowerCase()} review</h2><p>{assessment?.editable_facts.length ?? 0} core facts · {assessment?.source_summary.evidence_items_supplied ?? 0} evidence references · Updated 17 Oct 2026</p></div><div className="plan-score"><strong>{assessment?.plan.evidence_readiness ?? 42}</strong><span>/100<br />evidence ready</span></div><div className="plan-actions"><button className="secondary-button" onClick={() => setGenerated(false)}>Edit facts</button><button className="button button-dark" onClick={() => notify("Customer-ready report prepared for export")}>Export report</button></div></section>
+          <section className="plan-summary panel"><div><p className="eyebrow">Customized report</p><h2>{profile.name} {profile.stage.toLowerCase()} review</h2><p>{assessment?.editable_facts.length ?? 0} core facts · {assessment?.source_summary.evidence_items_supplied ?? 0} evidence references · Updated {new Date().toLocaleDateString("en-US", { dateStyle: "medium" })}</p></div><div className="plan-score"><strong>{reviewedAssessment?.plan.evidence_readiness ?? 0}</strong><span>/100<br />evidence ready</span></div><div className="plan-actions"><button className="secondary-button" onClick={() => setGenerated(false)}>Edit facts</button><button className="button button-dark" onClick={() => { const blob = new Blob([JSON.stringify({ product: profile, regions, assessment: reviewedAssessment }, null, 2)], { type: "application/json" }); const url = URL.createObjectURL(blob); const link = document.createElement("a"); link.href = url; link.download = `${profile.name || "product"}-soteria-assessment.json`; link.click(); URL.revokeObjectURL(url); notify("Assessment downloaded"); }}>Export report</button></div></section>
           <section className="plan-banner"><div><b>{currentFrameworks.length}</b><span>candidate frameworks</span></div><div><b>{assessment?.risk_signals.length ?? 0}</b><span>risk signals</span></div><div><b>{currentBlockers.length}</b><span>stage blockers</span></div><div><b>{regions.length}</b><span>regions reviewed</span></div></section>
 
           <section className="report-builder panel">
@@ -718,9 +709,9 @@ function Assessment({ notify }: { notify: (message: string) => void }) {
           </section>
 
           <section className="report-overview panel">
-            <div className="report-overview-head"><div><p className="eyebrow">Executive summary</p><h2>{isAsterDemo ? "AI-assisted credit workflow across EU and US entities" : `${profile.name} · ${regions.join(" and ") || "deployment scope to confirm"}`}</h2></div><Badge tone={assessment?.plan.decision === "do_not_launch" ? "red" : "amber"}>{assessment?.plan.decision === "do_not_launch" ? `${profile.stage} blocked` : "Conditions open"}</Badge></div>
+            <div className="report-overview-head"><div><p className="eyebrow">Executive summary</p><h2>{`${profile.name} · ${regions.join(" and ") || "deployment scope to confirm"}`}</h2></div><Badge tone={reviewedAssessment?.plan.decision === "do_not_launch" ? "red" : "amber"}>{reviewedAssessment?.plan.decision === "do_not_launch" ? `${profile.stage} blocked` : "Conditions open"}</Badge></div>
             <p>{reportSummary}</p>
-            <div className="report-fact-grid"><div><span>Product role</span><b>{isAsterDemo ? "Deployer / lender" : "Confirm role"}</b></div><div><span>Lifecycle</span><b>{profile.stage}</b></div><div><span>Primary users</span><b>{profile.users}</b></div><div><span>Accountable owner</span><b>{profile.owner}</b></div><div><span>Assessment confidence</span><b>{autofillConfidence}%</b></div><div><span>Target date</span><b>{isAsterDemo ? "15 Jan 2027" : "Not supplied"}</b></div></div>
+            <div className="report-fact-grid"><div><span>Product role</span><b>Confirm role</b></div><div><span>Lifecycle</span><b>{profile.stage}</b></div><div><span>Primary users</span><b>{profile.users}</b></div><div><span>Accountable owner</span><b>{profile.owner}</b></div><div><span>Assessment confidence</span><b>{autofillConfidence}%</b></div><div><span>Target date</span><b>Not supplied</b></div></div>
             <div className="report-conclusion"><span>Stage decision</span><p>{reportDecision}. This is a decision-support draft; final scope and approval remain with qualified legal, privacy, security, model-risk, and business owners.</p></div>
           </section>
 
@@ -733,13 +724,13 @@ function Assessment({ notify }: { notify: (message: string) => void }) {
           </section>}
 
           {reportSections.roadmap && <section className="panel report-detail-card">
-            <div className="panel-heading"><div><p className="eyebrow">Implementation</p><h2>Path to pilot decision</h2></div><Badge tone="blue">6 workstreams</Badge></div>
+            <div className="panel-heading"><div><p className="eyebrow">Implementation</p><h2>Path to {profile.stage.toLowerCase()} decision</h2></div><Badge tone="blue">{currentBlockers.length} workstreams</Badge></div>
             <div className="roadmap-grid">{roadmapGroups.map((items, index) => <div key={index}><span className="roadmap-day">{["Now", "Next", `Before ${profile.stage.toLowerCase()}`][index]}</span><h3>{["Close known gaps", "Complete specialist review", "Prove operating controls"][index]}</h3><ul>{items.map((item) => <li key={item.id}><b>{item.title}</b><small>Owner · {item.owner}</small></li>)}</ul><em>Gate · {items.length ? items.map((item) => item.evidence_needed).join("; ") : "Written scoped approval"}</em></div>)}</div>
           </section>}
 
           <div className="report-two-column">
             {reportSections.evidence && <section className="panel report-detail-card">
-              <div className="panel-heading"><div><p className="eyebrow">Evidence plan</p><h2>Proof to collect</h2></div><Badge tone="amber">7 items</Badge></div>
+              <div className="panel-heading"><div><p className="eyebrow">Evidence plan</p><h2>Proof to collect</h2></div><Badge tone="amber">{currentBlockers.length} items</Badge></div>
               <div className="evidence-plan-list">{currentBlockers.slice(0, 4).map((item, index) => <div key={item.id}><span>{String(index + 1).padStart(2, "0")}</span><p><b>{item.title}</b><small>{item.evidence_needed}</small></p><Badge tone="red">Needed</Badge></div>)}</div>
             </section>}
             {reportSections.questions && <section className="panel report-detail-card">
@@ -817,7 +808,7 @@ function Assurance({ notify }: { notify: (message: string) => void }) {
 }
 
 export default function Home() {
-  const [active, setActive] = useState<ViewId>("overview");
+  const [active, setActive] = useState<ViewId>("assess");
   const [query, setQuery] = useState("");
   const [toast, setToast] = useState("");
   const [mobileNav, setMobileNav] = useState(false);
@@ -840,13 +831,13 @@ export default function Home() {
           <p>Workspace</p>
           {navItems.map((item) => <button key={item.id} className={active === item.id ? "active" : ""} onClick={() => navigate(item.id)}><span className="nav-icon">{item.icon}</span><span>{item.label}</span>{item.count && <em>{item.count}</em>}</button>)}
         </nav>
-        <div className="workspace-card"><span className="workspace-avatar">AF</span><div><b>Aster Financial</b><small>Demo workspace</small></div><button aria-label="Workspace menu">···</button></div>
+        <div className="workspace-card"><span className="workspace-avatar">S</span><div><b>My workspace</b><small>Product assessments</small></div><button aria-label="Workspace menu">···</button></div>
       </aside>
       {mobileNav && <button className="nav-scrim" onClick={() => setMobileNav(false)} aria-label="Close navigation" />}
       <div className="main-shell">
         <header className="topbar">
           <div className="mobile-brand"><button className="menu-button" onClick={() => setMobileNav(true)} aria-label="Open navigation">☰</button><b>Soteria</b></div>
-          <div className="breadcrumb"><span>Aster Financial</span><i>/</i><b>{activeLabel}</b></div>
+          <div className="breadcrumb"><span>My workspace</span><i>/</i><b>{activeLabel}</b></div>
           <div className="global-search">
             <span>⌕</span><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search Soteria…" aria-label="Global search" /><kbd>⌘ K</kbd>
             {searchResults.length > 0 && <div className="search-popover">{searchResults.map((result) => <button key={`${result.type}-${result.meta}`} onClick={() => { navigate(result.view); setQuery(""); }}><Badge tone={result.type === "Source" ? "blue" : "purple"}>{result.type}</Badge><span><b>{result.title}</b><small>{result.meta}</small></span><em>↗</em></button>)}</div>}
