@@ -8,6 +8,8 @@ Each assessment starts empty and uses the submitted product. The uploader reads 
 
 Autofill currently uses source extraction and rules, with editable facts, source excerpts, and heuristic confidence estimates. No external language-model service is configured. Scanned PDFs require OCR before upload.
 
+Deployment footprint supports 249 countries and territories, all 50 US states, Washington DC, New York City, and the EU bloc. The searchable picker highlights verified AI legislation and provides official source links. Other locations remain selectable for local review. EU member-state and US state selections feed the assessment's parent-regime checks; a selectable geography does not imply a complete legal mapping.
+
 ## Run locally
 
 Requirements: Node.js `>=22.13.0`.

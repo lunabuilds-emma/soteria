@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { readDocument } from "../lib/read-document";
+import DeploymentFootprint from "./DeploymentFootprint";
 import { createSoteriaAssessment, type Capability } from "../lib/soteria";
 
 type ViewId =
@@ -549,6 +550,7 @@ function Assessment({ notify }: { notify: (message: string) => void }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           source_text: rawSource,
+          regions: regions.length ? regions : undefined,
           spec_links: intake.links.split("\n").map((item) => item.trim()).filter(Boolean),
           responsible_ai_standards: intake.standards.split("\n").map((item) => item.trim()).filter(Boolean),
           review_focus: intake.context,
@@ -682,7 +684,7 @@ function Assessment({ notify }: { notify: (message: string) => void }) {
               ))}
             </div>
             <div className="step-label"><span>3</span><div><b>Deployment footprint</b><small>Where users and affected people are located</small></div></div>
-            <div className="region-chips">{Array.from(new Set(["European Union", "United States", "South Korea", "China", "United Kingdom", ...regions])).map((region) => <button key={region} className={regions.includes(region) ? "selected" : ""} onClick={() => toggleRegion(region)}>{region} {regions.includes(region) ? "✓" : "+"}</button>)}</div>
+            <DeploymentFootprint selected={regions} onToggle={toggleRegion} />
             <button className="button button-dark generate" disabled={!assessment || !autofillRan || !profile.name || !profile.purpose} onClick={() => { setGenerated(true); notify("Tailored compliance plan generated"); }}>Generate tailored plan <span>→</span></button>
           </section>
           <aside className="assessment-insight panel">

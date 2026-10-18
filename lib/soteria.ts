@@ -1,3 +1,5 @@
+import { getJurisdiction, hasEUFootprint, hasUSFootprint, inferJurisdictions } from "./jurisdictions.ts";
+
 export const capabilityValues = [
   "generative_ai",
   "customer_data",
@@ -38,6 +40,7 @@ type Framework = {
   status: "candidate" | "recommended";
   rationale: string;
   validation: string;
+  source_url?: string;
 };
 
 type Blocker = {
@@ -99,21 +102,7 @@ function inferCapabilities(text: string): Capability[] {
 }
 
 function inferRegions(text: string): string[] {
-  const regions: string[] = [];
-  const patterns: Array<[RegExp, string]> = [
-    [/european union|\beu\b/i, "European Union"],
-    [/ireland/i, "Ireland"],
-    [/united states|\bu\.s\.?\b|\busa\b/i, "United States"],
-    [/new york|\bnyc\b/i, "New York"],
-    [/california/i, "California"],
-    [/colorado/i, "Colorado"],
-    [/south korea|korea/i, "South Korea"],
-    [/china|\bprc\b/i, "China"],
-  ];
-  for (const [pattern, label] of patterns) {
-    if (pattern.test(text)) regions.push(label);
-  }
-  return regions;
+  return inferJurisdictions(text);
 }
 
 function resolveInput(input: AssessmentInput) {
@@ -167,7 +156,7 @@ function frameworks(regions: string[], capabilities: Capability[], standards: st
   const result: Framework[] = [];
   const consequential = capabilities.includes("consequential_decisions");
 
-  if (/european union|ireland|france|germany|spain|italy/.test(regionText)) {
+  if (hasEUFootprint(regions)) {
     result.push({
       name: "EU AI Act",
       status: "candidate",
@@ -184,7 +173,7 @@ function frameworks(regions: string[], capabilities: Capability[], standards: st
   if (/colorado/.test(regionText) && consequential) {
     result.push({ name: "Colorado AI Act", status: "candidate", rationale: "Colorado use in consequential decisions may create developer or deployer duties.", validation: "Confirm covered decision, role, consumer nexus, exemptions, and operative dates." });
   }
-  if (/united states|new york|california|colorado/.test(regionText) && consequential) {
+  if (hasUSFootprint(regions) && consequential) {
     result.push({ name: "US sector and anti-discrimination requirements", status: "candidate", rationale: "Consequential-decision support may be governed by sector rules, civil-rights law, consumer protection, and state requirements.", validation: "Confirm the decision domain, entity role, affected people, notices, testing, records, explanations, and adverse-action workflow." });
   }
   if (/new york/.test(regionText) && capabilities.includes("employment")) {
@@ -198,6 +187,16 @@ function frameworks(regions: string[], capabilities: Capability[], standards: st
   }
   if (/china/.test(regionText) && capabilities.includes("generative_ai")) {
     result.push({ name: "China generative AI and labeling rules", status: "candidate", rationale: "Generative AI content distributed in China may require notices, labels, and metadata.", validation: "Confirm service availability, public-facing scope, content type, filing, and labeling rules." });
+  }
+
+  for (const region of regions) {
+    const jurisdiction = getJurisdiction(region);
+    const law = jurisdiction?.law;
+    if (law && !["European Union", "China", "South Korea"].includes(region) && law.kind !== "EU AI Act") {
+      result.push({ name: `${region} · ${law.title}`, status: "candidate", rationale: `Deployment in ${region} requires review of this ${law.kind === "Targeted AI rules" ? "targeted regime" : "enacted AI framework"}.`, validation: law.note, source_url: law.url });
+    } else if (!law && region !== "United States" && !jurisdiction?.parent?.includes("European Union")) {
+      result.push({ name: `${region} · local AI and sector review`, status: "candidate", rationale: `The product's deployment footprint includes ${region}.`, validation: "Confirm applicable AI-specific, sector, privacy, consumer-protection, and anti-discrimination rules. No complete local rule mapping is attached to this location." });
+    }
   }
 
   result.push({
